@@ -22,6 +22,9 @@ export interface ImportedEmployeeRow {
   department: string;
   position: string;
   status: EmployeeStatus;
+  has_department?: boolean;
+  has_position?: boolean;
+  has_status?: boolean;
 }
 
 function normalizeHeader(h: string): string {
@@ -66,17 +69,20 @@ export async function parseEmployeeImportFile(file: File): Promise<ImportedEmplo
       const employee_code = pick('employee_code', 'code', 'empcode', 'id', 'รหัสพนักงาน', 'รหัส').toUpperCase();
       const full_name = pick('full_name', 'fullname', 'name', 'ชื่อนามสกุล', 'ชื่อ-นามสกุล', 'ชื่อสกุล', 'ชื่อพนักงาน', 'ชื่อ');
       const nickname = pick('nickname', 'nick', 'ชื่อเล่น');
-      const department = pick('department', 'dept', 'แผนก', 'ฝ่าย') || 'ทั่วไป';
-      const position = pick('position', 'role', 'title', 'ตำแหน่ง') || 'พนักงาน';
-      const status = mapEmployeeStatus(pick('status', 'สถานะ'));
+      const rawDepartment = pick('department', 'dept', 'แผนก', 'ฝ่าย');
+      const rawPosition = pick('position', 'role', 'title', 'ตำแหน่ง');
+      const rawStatus = pick('status', 'สถานะ');
 
       return {
         employee_code,
         full_name,
         nickname,
-        department,
-        position,
-        status,
+        department: rawDepartment || 'ทั่วไป',
+        position: rawPosition || 'พนักงาน',
+        status: mapEmployeeStatus(rawStatus),
+        has_department: Boolean(rawDepartment),
+        has_position: Boolean(rawPosition),
+        has_status: Boolean(rawStatus),
       };
     })
     .filter((r) => r.employee_code && r.full_name);

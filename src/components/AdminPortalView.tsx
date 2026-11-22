@@ -28,6 +28,8 @@ import {
 import type {
   AuditLogEntry,
   BreakLogRecord,
+  BreakStatus,
+  BreakType,
   CalendarDayAggregate,
   EmployeeFull,
   EmployeeStatus,
@@ -57,18 +59,9 @@ import {
 } from '../utils/exportUtils';
 import { CalendarHistoryPanel } from './CalendarHistoryPanel';
 import { AdminDashboardOverview } from './AdminDashboardOverview';
+import { IndividualEmployeeDashboard } from './IndividualEmployeeDashboard';
 
-interface AdminPortalViewProps {
-  liveData: PublicLivePayload;
-  serverTimeOffsetMs: number;
-  wsConnected: boolean;
-  onGoTerminal: () => void;
-  onOpenEmployeeStats: (code: string) => void;
-  onRefreshLive: () => void;
-  realtimeSignal: number;
-}
-
-type AdminTab =
+export type AdminTab =
   | 'dashboard'
   | 'daily'
   | 'monthly'
@@ -77,6 +70,20 @@ type AdminTab =
   | 'employees'
   | 'logs'
   | 'audit';
+
+interface AdminPortalViewProps {
+  liveData: PublicLivePayload;
+  serverTimeOffsetMs: number;
+  wsConnected: boolean;
+  activeTab?: AdminTab;
+  onTabChange?: (tab: AdminTab) => void;
+  selectedIndividualCode?: string | null;
+  onSelectIndividualCode?: (code: string | null) => void;
+  onGoTerminal: () => void;
+  onOpenEmployeeStats: (code: string) => void;
+  onRefreshLive: () => void;
+  realtimeSignal: number;
+}
 
 interface ClearConfirmState {
   scope: 'daily' | 'monthly' | 'employees' | 'all_logs' | 'audit';
@@ -90,12 +97,24 @@ export function AdminPortalView({
   liveData,
   serverTimeOffsetMs,
   wsConnected,
+  activeTab: controlledActiveTab,
+  onTabChange,
+  selectedIndividualCode: controlledIndividualCode,
+  onSelectIndividualCode,
   onGoTerminal,
   onOpenEmployeeStats,
   onRefreshLive,
   realtimeSignal,
 }: AdminPortalViewProps) {
-  const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
+  const [internalActiveTab, setInternalActiveTab] = useState<AdminTab>('dashboard');
+  const activeTab = controlledActiveTab ?? internalActiveTab;
+  const setActiveTab = useCallback(
+    (tab: AdminTab) => {
+      if (onTabChange) onTabChange(tab);
+      else setInternalActiveTab(tab);
+    },
+    [onTabChange]
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -139,6 +158,29 @@ export function AdminPortalView({
   const [calendarDays, setCalendarDays] = useState<CalendarDayAggregate[]>([]);
   const [monthlySearch, setMonthlySearch] = useState('');
   const [individualSearch, setIndividualSearch] = useState('');
+  const [internalIndividualCode, setInternalIndividualCode] = useState<string | null>(null);
+  const selectedIndividualCode =
+    controlledIndividualCode !== undefined ? controlledIndividualCode : internalIndividualCode;
+  const setSelectedIndividualCode = useCallback(
+    (code: string | null) => {
+      if (onSelectIndividualCode) onSelectIndividualCode(code);
+      else setInternalIndividualCode(code);
+    },
+    [onSelectIndividualCode]
+  );
+
+  // Break Log Create / Edit modal state (unrestricted full control)
+  const [editingBreakLog, setEditingBreakLog] = useState<{
+    id?: number;
+    employee_code: string;
+    break_type: BreakType;
+    work_date: string;
+    start_time: string;
+    end_time: string;
+    status: BreakStatus;
+    note: string;
+  } | null>(null);
+  const [isNewBreakLog, setIsNewBreakLog] = useState(false);
 
   // Audit state
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
@@ -314,9 +356,23 @@ export function AdminPortalView({
       showMessage('error', data.error || 'บันทึกข้อมูลพนักงานไม่สำเร็จ');
       return;
     }
-    showMessage('success', isNewEmployee ? 'เพิ่มพนักงานใหม่เรียบร้อยแล้ว' : 'อัปเดตข้อมูลพนักงานเรียบร้อยแล้ว');
+
+    // Append or update only this employee in-place without reloading or wiping existing data
+    if (data.employee) {
+      const savedEmp = data.employee as EmployeeFull;
+      setEmployees((prev) => {
+        const exists = prev.some((item) => item.id === savedEmp.id);
+        const next = exists
+          ? prev.map((item) => (item.id === savedEmp.id ? savedEmp : item))
+          : [...prev, savedEmp];
+        return next.sort((a, b) => a.employee_code.localeCompare(b.employee_code));
+      });
+    }
+
+    showMessage('success', isNewEmployee ? 'เพิ่มพนักงานใหม่เรียบร้อยแล้ว (เพิ่มเติมข้อมูลโดยไม่รีเฟรชหน้า)' : 'อัปเดตข้อมูลพนักงานเรียบร้อยแล้ว');
     setEditingEmployee(null);
-    fetchEmployees();
+    fetchReports();
+    onRefreshLive();
     fetchAuditLogs();
   };
 
@@ -331,14 +387,17 @@ export function AdminPortalView({
       return;
     }
     setConfirmDeleteEmpId(null);
+    setEmployees((prev) => prev.filter((item) => item.id !== id));
     setSelectedEmployeeIds((prev) => prev.filter((item) => item !== id));
     showMessage('success', 'ลบข้อมูลพนักงานออกจากระบบแล้ว');
-    fetchEmployees();
+    fetchReports();
+    onRefreshLive();
     fetchAuditLogs();
   };
 
   const handleBulkDeleteEmployees = async () => {
     if (selectedEmployeeIds.length === 0) return;
+    const removedIds = new Set(selectedEmployeeIds);
     const res = await fetch('/api/admin/employees/bulk-delete', {
       method: 'POST',
       headers: authHeaders,
@@ -350,9 +409,9 @@ export function AdminPortalView({
       return;
     }
     setConfirmBulkDelete(false);
+    setEmployees((prev) => prev.filter((item) => !removedIds.has(item.id)));
     setSelectedEmployeeIds([]);
     showMessage('success', `เอาออก/ลบรายชื่อพนักงานที่เลือก ${data.deleted} คนเรียบร้อยแล้ว`);
-    fetchEmployees();
     fetchReports();
     onRefreshLive();
     fetchAuditLogs();
@@ -360,6 +419,7 @@ export function AdminPortalView({
 
   const handleBulkUpdateStatus = async () => {
     if (selectedEmployeeIds.length === 0) return;
+    const targetIds = new Set(selectedEmployeeIds);
     const res = await fetch('/api/admin/employees/bulk-status', {
       method: 'POST',
       headers: authHeaders,
@@ -370,10 +430,12 @@ export function AdminPortalView({
       showMessage('error', data.error || 'อัปเดตสถานะไม่สำเร็จ');
       return;
     }
+    setEmployees((prev) =>
+      prev.map((item) => (targetIds.has(item.id) ? { ...item, status: bulkStatusValue } : item))
+    );
     const label = getEmployeeStatusMeta(bulkStatusValue).shortLabel;
     showMessage('success', `อัปเดตสถานะพนักงาน ${data.updated} คน เป็น "${label}" เรียบร้อยแล้ว`);
     setSelectedEmployeeIds([]);
-    fetchEmployees();
     fetchReports();
     onRefreshLive();
     fetchAuditLogs();
@@ -441,12 +503,27 @@ export function AdminPortalView({
         showMessage('error', data.error || 'นำเข้าข้อมูลไม่สำเร็จ');
         return;
       }
+
+      // Merge imported/updated records directly into existing employees without wiping existing records
+      if (Array.isArray(data.employees)) {
+        const importedList = data.employees as EmployeeFull[];
+        setEmployees((prev) => {
+          const map = new Map<number, EmployeeFull>();
+          prev.forEach((emp) => map.set(emp.id, emp));
+          importedList.forEach((emp) => map.set(emp.id, emp));
+          return Array.from(map.values()).sort((a, b) =>
+            a.employee_code.localeCompare(b.employee_code)
+          );
+        });
+      }
+
       showMessage(
         'success',
-        `นำเข้าสำเร็จ: เพิ่มใหม่ ${data.inserted} คน · อัปเดต ${data.updated} คน`
+        `นำเข้าสำเร็จ: เพิ่มใหม่ ${data.inserted} คน · อัปเดตเพิ่มเติม ${data.updated} คน (ข้อมูลเดิมทั้งหมดยังคงอยู่)`
       );
       setImportPreview(null);
-      fetchEmployees();
+      fetchReports();
+      onRefreshLive();
       fetchAuditLogs();
     } finally {
       setImporting(false);
@@ -459,9 +536,15 @@ export function AdminPortalView({
       headers: authHeaders,
       body: JSON.stringify({ force_end: true }),
     });
+    const data = await res.json();
     if (res.ok) {
+      if (data.record) {
+        const updated = data.record as BreakLogRecord;
+        setLogs((prev) => prev.map((l) => (l.id === updated.id ? updated : l)));
+      }
       showMessage('success', 'ปิดรอบเวลาพักของพนักงานเรียบร้อยแล้ว');
-      fetchLogs();
+      onRefreshLive();
+      fetchReports();
       fetchAuditLogs();
     }
   };
@@ -472,9 +555,103 @@ export function AdminPortalView({
       headers: authHeaders,
     });
     if (res.ok) {
+      setLogs((prev) => prev.filter((l) => l.id !== logId));
       showMessage('success', 'ลบบันทึกเวลาพักเรียบร้อยแล้ว');
-      fetchLogs();
+      onRefreshLive();
+      fetchReports();
       fetchAuditLogs();
+    }
+  };
+
+  const toBangkokTimeInput = (iso: string | null | undefined): string => {
+    if (!iso) return '';
+    try {
+      return new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Bangkok',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(new Date(iso));
+    } catch {
+      return '';
+    }
+  };
+
+  const openNewBreakLogModal = (defaultDate?: string) => {
+    const fallbackCode = employees[0]?.employee_code || 'EMP001';
+    const nowTime = toBangkokTimeInput(new Date().toISOString()) || '10:00:00';
+    setIsNewBreakLog(true);
+    setEditingBreakLog({
+      employee_code: fallbackCode,
+      break_type: 'break_1',
+      work_date: defaultDate || liveData.today_date || formatBangkokDateISO(),
+      start_time: nowTime,
+      end_time: '',
+      status: 'active',
+      note: '',
+    });
+  };
+
+  const openEditBreakLogModal = (log: BreakLogRecord) => {
+    setIsNewBreakLog(false);
+    setEditingBreakLog({
+      id: log.id,
+      employee_code: log.employee_code,
+      break_type: log.break_type,
+      work_date: log.work_date,
+      start_time: toBangkokTimeInput(log.start_time),
+      end_time: toBangkokTimeInput(log.end_time),
+      status: log.status,
+      note: log.note || '',
+    });
+  };
+
+  const handleSaveBreakLog = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editingBreakLog) return;
+    const url = isNewBreakLog ? '/api/admin/logs' : `/api/admin/logs/${editingBreakLog.id}`;
+    const method = isNewBreakLog ? 'POST' : 'PUT';
+
+    const res = await fetch(url, {
+      method,
+      headers: authHeaders,
+      body: JSON.stringify(editingBreakLog),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showMessage('error', data.error || 'บันทึกเวลาพักไม่สำเร็จ');
+      return;
+    }
+
+    if (data.record) {
+      const saved = data.record as BreakLogRecord;
+      setLogs((prev) => {
+        const exists = prev.some((item) => item.id === saved.id);
+        return exists
+          ? prev.map((item) => (item.id === saved.id ? saved : item))
+          : [saved, ...prev];
+      });
+    }
+
+    showMessage(
+      'success',
+      isNewBreakLog ? 'เพิ่มบันทึกเวลาพักเรียบร้อยแล้ว' : 'แก้ไขบันทึกเวลาพักเรียบร้อยแล้ว'
+    );
+    setEditingBreakLog(null);
+    onRefreshLive();
+    fetchReports();
+    fetchAuditLogs();
+  };
+
+  const handleDeleteAuditLog = async (auditId: number) => {
+    const res = await fetch(`/api/admin/audit/${auditId}`, {
+      method: 'DELETE',
+      headers: authHeaders,
+    });
+    if (res.ok) {
+      setAuditLogs((prev) => prev.filter((item) => item.id !== auditId));
+      showMessage('success', 'ลบบันทึก Audit รายการนี้เรียบร้อยแล้ว');
     }
   };
 
@@ -503,6 +680,9 @@ export function AdminPortalView({
   ];
 
   const handleSelectTab = (tab: AdminTab) => {
+    if (tab === 'individual' && activeTab === 'individual') {
+      setSelectedIndividualCode(null);
+    }
     setActiveTab(tab);
     setMobileMenuOpen(false);
   };
@@ -592,10 +772,10 @@ export function AdminPortalView({
                         <motion.span
                           layoutId="floating-sidebar-active"
                           transition={{ type: 'spring', stiffness: 380, damping: 30 }}
-                          className="absolute inset-0 rounded-2xl bg-sky-500/20 border border-sky-600/35 shadow-sm"
+                          className="absolute inset-0 rounded-2xl bg-white/75 border border-white/95 shadow-[inset_0_1.5px_0_rgba(255,255,255,1),0_8px_20px_-8px_rgba(14,165,233,0.3)] backdrop-blur-md"
                         />
                       )}
-                      <Icon className={`w-4 h-4 relative z-10 shrink-0 ${active ? 'text-sky-700' : 'text-slate-500'}`} />
+                      <Icon className={`w-4 h-4 relative z-10 shrink-0 ${active ? 'text-sky-700' : 'text-slate-600'}`} />
                       {!sidebarCollapsed && (
                         <span className="relative z-10 truncate">{item.label}</span>
                       )}
@@ -608,12 +788,12 @@ export function AdminPortalView({
         </div>
 
         {/* Bottom Floating Label & Page Switcher */}
-        <div className="pt-3 mt-3 border-t border-slate-300/60 space-y-2">
+        <div className="pt-3 mt-3 border-t border-white/55 space-y-2">
           {!sidebarCollapsed && (
             <div className="liquid-glass-card rounded-2xl px-3 py-2.5">
-              <div className="text-xs font-bold text-slate-900 truncate">Admin</div>
-              <div className="text-[11px] font-medium text-sky-700">
-                ระบบจัดการข้อมูลและรายงานหลังบ้าน
+              <div className="text-xs font-bold text-slate-900 truncate">Admin · Full Access</div>
+              <div className="text-[11px] font-medium text-emerald-700">
+                เปิดสิทธิ์จัดการข้อมูลทุกส่วนให้ทุกคน
               </div>
             </div>
           )}
@@ -623,7 +803,7 @@ export function AdminPortalView({
               type="button"
               onClick={onGoTerminal}
               title="สลับไปหน้าลงเวลาพัก"
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+              className="liquid-glass-btn-primary w-full inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-2xl text-xs font-semibold text-white cursor-pointer whitespace-nowrap"
             >
               <Clock className="w-3.5 h-3.5 shrink-0" />
               {!sidebarCollapsed && <span>สลับไปหน้าลงเวลา</span>}
@@ -633,7 +813,7 @@ export function AdminPortalView({
               target="_blank"
               rel="noopener noreferrer"
               title="เปิดหน้าลงเวลาพักในหน้าต่างใหม่"
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-800 hover:bg-white/90 transition-colors whitespace-nowrap"
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-2xl text-xs font-semibold liquid-glass-card text-slate-800 whitespace-nowrap"
             >
               <ExternalLink className="w-3.5 h-3.5 shrink-0" />
               {!sidebarCollapsed && <span>เปิดหน้าลงเวลา (แท็บใหม่)</span>}
@@ -643,7 +823,34 @@ export function AdminPortalView({
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 min-w-0 space-y-6 pb-8">
+      <main className="flex-1 min-w-0 space-y-5 pb-8">
+        {/* Floating Liquid Glass Context Bar */}
+        <div className="hidden lg:flex liquid-glass rounded-full px-5 py-2.5 items-center justify-between gap-6">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-700 whitespace-nowrap">
+            <span className="text-sky-800 font-bold">Admin</span>
+            <span aria-hidden="true" className="text-slate-400">/</span>
+            <span className="text-slate-900">
+              {navGroups.flatMap((g) => g.items).find((i) => i.id === activeTab)?.label || 'ภาพรวม'}
+            </span>
+            {activeTab === 'individual' && selectedIndividualCode && (
+              <>
+                <span aria-hidden="true" className="text-slate-400">/</span>
+                <span className="font-mono-tabular text-sky-700">{selectedIndividualCode}</span>
+              </>
+            )}
+          </div>
+          <div className="flex items-center gap-3 text-xs text-slate-700 font-medium whitespace-nowrap">
+            <span>{formatThaiDateLabel(liveData.today_date)}</span>
+            <span aria-hidden="true" className="text-slate-400">·</span>
+            <span className="font-mono-tabular font-bold text-slate-900">
+              {formatBangkokTime(new Date(syncedNowMs).toISOString())}
+            </span>
+            <span aria-hidden="true" className="text-slate-400">·</span>
+            <span className={wsConnected ? 'text-emerald-700 font-semibold' : 'text-amber-700 font-semibold'}>
+              {wsConnected ? 'เชื่อมต่อเรียลไทม์' : 'กำลังเชื่อมต่อ'}
+            </span>
+          </div>
+        </div>
         {/* Global Feedback Toast */}
         <AnimatePresence>
           {toast && (
@@ -689,7 +896,7 @@ export function AdminPortalView({
                 scope: 'all_logs',
                 title: 'ล้างข้อมูลบันทึกเวลาพักทั้งหมด',
                 description:
-                  'การดำเนินการนี้จะลบบันทึกเวลาพักและสถิติการพักทั้งหมดในระบบอย่างถาวร (เฉพาะ Admin เท่านั้น)',
+                  'การดำเนินการนี้จะลบบันทึกเวลาพักและสถิติการพักทั้งหมดในระบบอย่างถาวร',
               })
             }
           />
@@ -748,6 +955,14 @@ export function AdminPortalView({
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    onClick={() => openNewBreakLogModal(liveData.today_date)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    เพิ่มบันทึกเวลา
+                  </button>
+                  <button
+                    type="button"
                     onClick={() =>
                       exportBreakLogsReport(filteredDailyLogs, `Daily_Break_${liveData.today_date}`, 'xlsx')
                     }
@@ -774,7 +989,7 @@ export function AdminPortalView({
                           scope: 'daily',
                           date: liveData.today_date,
                           title: `ล้างข้อมูลรายวัน (${formatThaiDateLabel(liveData.today_date)})`,
-                          description: 'ลบรายการบันทึกเวลาพักทั้งหมดของวันนี้ออกจากระบบ (เฉพาะ Admin เท่านั้น)',
+                          description: 'ลบรายการบันทึกเวลาพักทั้งหมดของวันนี้ออกจากระบบ',
                         })
                       }
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
@@ -822,9 +1037,9 @@ export function AdminPortalView({
                 </div>
               </div>
 
-              <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55">
+              <div className="overflow-x-auto rounded-2xl liquid-glass-table">
                 <table className="w-full text-left border-collapse text-sm">
-                  <thead className="bg-white/85 text-xs text-slate-700 border-b border-slate-300/60">
+                  <thead className="liquid-glass-thead text-xs text-slate-700 border-b border-white/60">
                     <tr>
                       <th className="py-3 px-3.5 font-semibold">รหัส / พนักงาน</th>
                       <th className="py-3 px-3.5 font-semibold">แผนก</th>
@@ -834,12 +1049,13 @@ export function AdminPortalView({
                       <th className="py-3 px-3.5 font-semibold text-right">ระยะเวลา</th>
                       <th className="py-3 px-3.5 font-semibold">สถานะ</th>
                       <th className="py-3 px-3.5 font-semibold">หมายเหตุ</th>
+                      <th className="py-3 px-3.5 font-semibold text-right">จัดการ</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200/70">
                     {filteredDailyLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="py-10 text-center text-slate-500">
+                        <td colSpan={9} className="py-10 text-center text-slate-500">
                           ไม่พบรายการบันทึกเวลาพักตามเงื่อนไขที่เลือก
                         </td>
                       </tr>
@@ -886,6 +1102,35 @@ export function AdminPortalView({
                             </td>
                             <td className="py-2.5 px-3.5 text-xs text-slate-600 max-w-[200px] truncate">
                               {log.note || '—'}
+                            </td>
+                            <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center gap-1">
+                                {log.status === 'active' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleForceEndBreak(log.id)}
+                                    className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                                  >
+                                    ปิดรอบพัก
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => openEditBreakLogModal(log)}
+                                  className="p-1.5 rounded-lg text-sky-700 hover:bg-sky-500/15 cursor-pointer"
+                                  title="แก้ไขบันทึกเวลาพัก"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteLog(log.id)}
+                                  className="p-1.5 rounded-lg text-rose-700 hover:bg-rose-500/15 cursor-pointer"
+                                  title="ลบบันทึก"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -941,7 +1186,7 @@ export function AdminPortalView({
                         scope: 'monthly',
                         month: reportMonth,
                         title: `ล้างข้อมูลเดือน ${formatThaiMonthLabel(reportMonth)}`,
-                        description: 'ลบบันทึกเวลาพักทั้งหมดในเดือนที่เลือกออกจากระบบ (เฉพาะ Admin เท่านั้น)',
+                        description: 'ลบบันทึกเวลาพักทั้งหมดในเดือนที่เลือกออกจากระบบ',
                       })
                     }
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
@@ -964,9 +1209,9 @@ export function AdminPortalView({
               />
             </div>
 
-            <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55">
+            <div className="overflow-x-auto rounded-2xl liquid-glass-table">
               <table className="w-full text-left border-collapse text-sm">
-                <thead className="bg-white/85 text-xs text-slate-700 border-b border-slate-300/60">
+                <thead className="liquid-glass-thead text-xs text-slate-700 border-b border-white/60">
                   <tr>
                     <th className="py-3 px-3.5 font-semibold">พนักงาน</th>
                     <th className="py-3 px-3.5 font-semibold">แผนก</th>
@@ -984,10 +1229,18 @@ export function AdminPortalView({
                   {filteredMonthlySummaries.map((s) => (
                     <tr key={s.employee_id} className="hover:bg-white/70 transition-colors">
                       <td className="py-2.5 px-3.5">
-                        <div className="font-mono-tabular text-xs font-semibold text-sky-700">
-                          {s.employee_code}
-                        </div>
-                        <div className="text-slate-900 font-semibold">{s.full_name}</div>
+                        <button
+                          type="button"
+                          onClick={() => onOpenEmployeeStats(s.employee_code)}
+                          className="text-left group cursor-pointer"
+                        >
+                          <div className="font-mono-tabular text-xs font-semibold text-sky-700 group-hover:underline">
+                            {s.employee_code}
+                          </div>
+                          <div className="text-slate-900 font-semibold group-hover:text-sky-800 group-hover:underline">
+                            {s.full_name}
+                          </div>
+                        </button>
                       </td>
                       <td className="py-2.5 px-3.5 text-xs text-slate-700">{s.department}</td>
                       <td className="py-2.5 px-3.5 font-mono-tabular text-right text-slate-900 font-bold">
@@ -1037,111 +1290,142 @@ export function AdminPortalView({
                 scope: 'daily',
                 date: dateStr,
                 title: `ล้างข้อมูลวันที่ ${formatThaiDateLabel(dateStr)}`,
-                description: 'ลบบันทึกเวลาพักทั้งหมดของวันที่เลือกออกจากระบบ (เฉพาะ Admin เท่านั้น)',
+                description: 'ลบบันทึกเวลาพักทั้งหมดของวันที่เลือกออกจากระบบ',
               })
             }
           />
         )}
 
-        {/* TAB: INDIVIDUAL STATS DIRECTORY */}
+        {/* TAB: INDIVIDUAL STATS DIRECTORY & INLINE DASHBOARD */}
         {activeTab === 'individual' && (
-          <div className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">สถิติรายบุคคล (Individual Statistics)</h2>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  เลือกพนักงานเพื่อเปิดหน้าต่างวิเคราะห์สถิติรายบุคคล กราฟรายวัน และดาวน์โหลดรายงานเฉพาะบุคคล
-                </p>
+          selectedIndividualCode ? (
+            <IndividualEmployeeDashboard
+              employeeCode={selectedIndividualCode}
+              month={reportMonth}
+              onMonthChange={setReportMonth}
+              serverTimeOffsetMs={serverTimeOffsetMs}
+              employeesList={employees}
+              onSelectEmployee={(code) => setSelectedIndividualCode(code)}
+              onBack={() => setSelectedIndividualCode(null)}
+              canClearData={isSuperAdmin}
+              onDataCleared={() => {
+                fetchReports();
+                fetchLogs();
+                onRefreshLive();
+                fetchAuditLogs();
+              }}
+              realtimeSignal={realtimeSignal}
+            />
+          ) : (
+            <div className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-900">สถิติรายบุคคล (Individual Statistics)</h2>
+                  <p className="text-xs text-slate-600 mt-0.5">
+                    คลิกที่ชื่อพนักงานเพื่อแสดง Dashboard สถิติการลงเวลาพักรายบุคคล กราฟรายวัน และประวัติย้อนหลัง
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="month"
+                    value={reportMonth}
+                    onChange={(e) => setReportMonth(e.target.value)}
+                    className="px-3 py-2 rounded-xl liquid-glass-input text-xs text-slate-900 font-mono-tabular focus:outline-none"
+                  />
+                  {isSuperAdmin && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setClearConfirm({
+                          scope: 'monthly',
+                          month: reportMonth,
+                          title: `ล้างข้อมูลสถิติเดือน ${formatThaiMonthLabel(reportMonth)}`,
+                          description:
+                            'ล้างประวัติการพักและสถิติรายบุคคลทั้งหมดของเดือนที่เลือก (หรือเลือกกดล้างเฉพาะรายคนใน Dashboard พนักงาน)',
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      ล้างสถิติเดือนนี้
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+
+              <div className="relative w-full sm:w-96">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
-                  type="month"
-                  value={reportMonth}
-                  onChange={(e) => setReportMonth(e.target.value)}
-                  className="px-3 py-2 rounded-xl liquid-glass-input text-xs text-slate-900 font-mono-tabular focus:outline-none"
+                  type="text"
+                  value={individualSearch}
+                  onChange={(e) => setIndividualSearch(e.target.value)}
+                  placeholder="ค้นหารหัสพนักงาน ชื่อ-นามสกุล หรือแผนก..."
+                  className="w-full pl-9 pr-3 py-2.5 rounded-xl liquid-glass-input text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
                 />
-                {isSuperAdmin && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setClearConfirm({
-                        scope: 'monthly',
-                        month: reportMonth,
-                        title: `ล้างข้อมูลสถิติเดือน ${formatThaiMonthLabel(reportMonth)}`,
-                        description:
-                          'ล้างประวัติการพักและสถิติรายบุคคลทั้งหมดของเดือนที่เลือก (หรือเลือกกดล้างเฉพาะรายคนในหน้าต่างสถิติ)',
-                      })
-                    }
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    ล้างสถิติเดือนนี้
-                  </button>
-                )}
               </div>
-            </div>
 
-            <div className="relative w-full sm:w-96">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={individualSearch}
-                onChange={(e) => setIndividualSearch(e.target.value)}
-                placeholder="ค้นหารหัสพนักงาน ชื่อ-นามสกุล หรือแผนก..."
-                className="w-full pl-9 pr-3 py-2.5 rounded-xl liquid-glass-input text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
-              />
-            </div>
+              {filteredIndividualDirectory.length === 0 ? (
+                <div className="py-12 text-center text-sm text-slate-500 liquid-glass-card rounded-2xl">
+                  ไม่พบรายชื่อพนักงานที่ตรงกับคำค้นหา
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {filteredIndividualDirectory.map((emp) => (
+                    <button
+                      key={emp.employee_id}
+                      type="button"
+                      onClick={() => setSelectedIndividualCode(emp.employee_code)}
+                      className="liquid-glass-card rounded-2xl p-4 text-left hover:border-sky-500/70 hover:bg-white/85 transition-all cursor-pointer group"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-10 h-10 rounded-xl bg-sky-600/15 border border-sky-600/25 flex items-center justify-center text-sky-700 shrink-0 group-hover:bg-sky-600 group-hover:text-white transition-colors">
+                            <User className="w-5 h-5" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="font-mono-tabular text-xs font-bold text-sky-700">
+                              {emp.employee_code}
+                            </div>
+                            <div className="text-sm font-bold text-slate-900 truncate group-hover:text-sky-800 group-hover:underline">
+                              {emp.full_name}
+                            </div>
+                            <div className="text-xs text-slate-600 truncate">
+                              {emp.department} · {emp.position}
+                            </div>
+                          </div>
+                        </div>
+                        <span className="font-mono-tabular text-sm font-bold text-emerald-700 shrink-0">
+                          {emp.punctuality_rate}%
+                        </span>
+                      </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredIndividualDirectory.map((emp) => (
-                <button
-                  key={emp.employee_id}
-                  type="button"
-                  onClick={() => onOpenEmployeeStats(emp.employee_code)}
-                  className="liquid-glass-card rounded-2xl p-4 text-left hover:border-sky-500/70 hover:bg-white/85 transition-all cursor-pointer group"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="w-10 h-10 rounded-xl bg-sky-600/15 border border-sky-600/25 flex items-center justify-center text-sky-700 shrink-0">
-                        <User className="w-5 h-5" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="font-mono-tabular text-xs font-bold text-sky-700">
-                          {emp.employee_code}
+                      <div className="mt-3 pt-3 border-t border-slate-300/60 grid grid-cols-3 gap-2 text-xs font-mono-tabular">
+                        <div>
+                          <div className="text-[11px] text-slate-500">พักรวม</div>
+                          <div className="text-slate-900 font-bold">{emp.total_breaks} ครั้ง</div>
                         </div>
-                        <div className="text-sm font-bold text-slate-900 truncate group-hover:underline">
-                          {emp.full_name}
+                        <div>
+                          <div className="text-[11px] text-slate-500">เวลารวม</div>
+                          <div className="text-sky-700 font-bold">{emp.total_minutes} น.</div>
                         </div>
-                        <div className="text-xs text-slate-600 truncate">
-                          {emp.department} · {emp.position}
+                        <div>
+                          <div className="text-[11px] text-slate-500">เกิน 5 นาที</div>
+                          <div className={emp.overtime_count > 0 ? 'text-rose-700 font-bold' : 'text-slate-600'}>
+                            {emp.overtime_count} ครั้ง
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <span className="font-mono-tabular text-sm font-bold text-emerald-700 shrink-0">
-                      {emp.punctuality_rate}%
-                    </span>
-                  </div>
 
-                  <div className="mt-3 pt-3 border-t border-slate-300/60 grid grid-cols-3 gap-2 text-xs font-mono-tabular">
-                    <div>
-                      <div className="text-[11px] text-slate-500">พักรวม</div>
-                      <div className="text-slate-900 font-bold">{emp.total_breaks} ครั้ง</div>
-                    </div>
-                    <div>
-                      <div className="text-[11px] text-slate-500">เวลารวม</div>
-                      <div className="text-sky-700 font-bold">{emp.total_minutes} น.</div>
-                    </div>
-                    <div>
-                      <div className="text-[11px] text-slate-500">เกิน 5 นาที</div>
-                      <div className={emp.overtime_count > 0 ? 'text-rose-700 font-bold' : 'text-slate-600'}>
-                        {emp.overtime_count} ครั้ง
+                      <div className="mt-2.5 pt-2 border-t border-slate-200/70 flex items-center justify-between text-[11px] font-semibold text-sky-700">
+                        <span>คลิกชื่อเพื่อเปิด Dashboard สถิติการลงเวลา</span>
+                        <span className="group-hover:translate-x-0.5 transition-transform">ดู Dashboard →</span>
                       </div>
-                    </div>
-                  </div>
-                </button>
-              ))}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-          </div>
+          )
         )}
 
         {/* TAB: EMPLOYEES & EXCEL/CSV IMPORT (NO CONTACT INFO / NO SHIFT, MULTI-SELECT STATUS & REMOVAL) */}
@@ -1221,7 +1505,7 @@ export function AdminPortalView({
                         scope: 'employees',
                         title: 'ล้างรายชื่อพนักงานทั้งหมด',
                         description:
-                          'ลบรายชื่อพนักงานและประวัติการพักทั้งหมดออกจากระบบอย่างถาวร (เฉพาะ Admin เท่านั้น)',
+                          'ลบรายชื่อพนักงานและประวัติการพักทั้งหมดออกจากระบบอย่างถาวร',
                       })
                     }
                     className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
@@ -1441,9 +1725,9 @@ export function AdminPortalView({
               )}
             </AnimatePresence>
 
-            <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55">
+            <div className="overflow-x-auto rounded-2xl liquid-glass-table">
               <table className="w-full text-left border-collapse text-sm">
-                <thead className="bg-white/85 text-xs text-slate-700 border-b border-slate-300/60">
+                <thead className="liquid-glass-thead text-xs text-slate-700 border-b border-white/60">
                   <tr>
                     {canEdit && (
                       <th className="py-3 px-3 w-10 text-center">
@@ -1502,10 +1786,14 @@ export function AdminPortalView({
                             </button>
                           </td>
                           <td className="py-2.5 px-3.5">
-                            <div className="text-slate-900 font-semibold">
+                            <button
+                              type="button"
+                              onClick={() => onOpenEmployeeStats(emp.employee_code)}
+                              className="text-left text-slate-900 font-semibold hover:text-sky-800 hover:underline cursor-pointer"
+                            >
                               {emp.full_name}{' '}
                               {emp.nickname && <span className="text-xs text-slate-500">({emp.nickname})</span>}
-                            </div>
+                            </button>
                           </td>
                           <td className="py-2.5 px-3.5">
                             <div className="text-xs font-medium text-slate-800">{emp.department}</div>
@@ -1518,6 +1806,11 @@ export function AdminPortalView({
                                 value={emp.status}
                                 onChange={async (e) => {
                                   const nextStatus = e.target.value as EmployeeStatus;
+                                  setEmployees((prev) =>
+                                    prev.map((item) =>
+                                      item.id === emp.id ? { ...item, status: nextStatus } : item
+                                    )
+                                  );
                                   const res = await fetch(`/api/admin/employees/${emp.id}`, {
                                     method: 'PUT',
                                     headers: authHeaders,
@@ -1528,10 +1821,11 @@ export function AdminPortalView({
                                       'success',
                                       `ปรับสถานะ ${emp.employee_code} เป็น "${getEmployeeStatusMeta(nextStatus).shortLabel}"`
                                     );
-                                    fetchEmployees();
                                     fetchReports();
                                     onRefreshLive();
                                     fetchAuditLogs();
+                                  } else {
+                                    fetchEmployees();
                                   }
                                 }}
                                 className={`px-2.5 py-1 rounded-lg text-xs font-semibold border cursor-pointer focus:outline-none ${empSt.bgClass} ${empSt.textClass} ${empSt.borderClass}`}
@@ -1620,6 +1914,14 @@ export function AdminPortalView({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => openNewBreakLogModal()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  เพิ่มบันทึกเวลาพัก
+                </button>
+                <button
+                  type="button"
                   onClick={() => exportBreakLogsReport(logs, 'Admin_Break_Logs', 'xlsx')}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-sky-600 text-white hover:bg-sky-700 transition-colors cursor-pointer whitespace-nowrap"
                 >
@@ -1641,7 +1943,7 @@ export function AdminPortalView({
                       setClearConfirm({
                         scope: 'all_logs',
                         title: 'ล้างบันทึกเวลาพักทั้งหมด',
-                        description: 'ลบบันทึกเวลาพักทุกวันและทุกพนักงานออกจากระบบอย่างถาวร (เฉพาะ Admin เท่านั้น)',
+                        description: 'ลบบันทึกเวลาพักทุกวันและทุกพนักงานออกจากระบบอย่างถาวร',
                       })
                     }
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer whitespace-nowrap"
@@ -1692,9 +1994,9 @@ export function AdminPortalView({
               </select>
             </div>
 
-            <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55 max-h-[540px] overflow-y-auto">
+            <div className="overflow-x-auto rounded-2xl liquid-glass-table max-h-[540px] overflow-y-auto">
               <table className="w-full text-left border-collapse text-sm">
-                <thead className="bg-white/85 sticky top-0 text-xs text-slate-700 border-b border-slate-300/60">
+                <thead className="liquid-glass-thead sticky top-0 text-xs text-slate-700 border-b border-white/60">
                   <tr>
                     <th className="py-2.5 px-3 font-semibold">วันที่</th>
                     <th className="py-2.5 px-3 font-semibold">พนักงาน</th>
@@ -1746,7 +2048,7 @@ export function AdminPortalView({
                           {log.note || '—'}
                         </td>
                         <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1.5">
+                          <div className="inline-flex items-center gap-1">
                             {canEdit && log.status === 'active' && (
                               <button
                                 type="button"
@@ -1756,6 +2058,14 @@ export function AdminPortalView({
                                 ปิดรอบพัก
                               </button>
                             )}
+                            <button
+                              type="button"
+                              onClick={() => openEditBreakLogModal(log)}
+                              className="p-1.5 rounded-lg text-sky-700 hover:bg-sky-500/15 cursor-pointer"
+                              title="แก้ไขบันทึกเวลาพัก"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
                             {isSuperAdmin && (
                               <button
                                 type="button"
@@ -1811,7 +2121,7 @@ export function AdminPortalView({
                       setClearConfirm({
                         scope: 'audit',
                         title: 'ล้างบันทึกการทำงานระบบทั้งหมด',
-                        description: 'ลบบันทึก Audit Logs ทั้งหมดออกจากระบบอย่างถาวร (เฉพาะ Admin เท่านั้น)',
+                        description: 'ลบบันทึก Audit Logs ทั้งหมดออกจากระบบอย่างถาวร',
                       })
                     }
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer"
@@ -1823,15 +2133,16 @@ export function AdminPortalView({
               </div>
             </div>
 
-            <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55 max-h-[540px] overflow-y-auto">
+            <div className="overflow-x-auto rounded-2xl liquid-glass-table max-h-[540px] overflow-y-auto">
               <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-white/85 sticky top-0 text-slate-700 border-b border-slate-300/60">
+                <thead className="liquid-glass-thead sticky top-0 text-slate-700 border-b border-white/60">
                   <tr>
                     <th className="py-2.5 px-3 font-semibold">เวลา</th>
                     <th className="py-2.5 px-3 font-semibold">ผู้ดำเนินการ</th>
                     <th className="py-2.5 px-3 font-semibold">คำสั่ง</th>
                     <th className="py-2.5 px-3 font-semibold">เป้าหมาย</th>
                     <th className="py-2.5 px-3 font-semibold">รายละเอียด</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">ลบ</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200/70">
@@ -1846,6 +2157,16 @@ export function AdminPortalView({
                         {a.target_type} · {a.target_id}
                       </td>
                       <td className="py-2 px-3 text-slate-800">{a.details}</td>
+                      <td className="py-2 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteAuditLog(a.id)}
+                          className="p-1 rounded-lg text-rose-700 hover:bg-rose-500/15 cursor-pointer"
+                          title="ลบรายการนี้"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1858,7 +2179,7 @@ export function AdminPortalView({
       {/* Modal: Inline Admin-only Clear Data Confirmation */}
       {clearConfirm && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/45 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 liquid-glass-modal-backdrop"
           onClick={() => !clearingData && setClearConfirm(null)}
         >
           <div
@@ -1890,9 +2211,175 @@ export function AdminPortalView({
                 onClick={handleExecuteClearData}
                 className="px-4 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white shadow-sm cursor-pointer disabled:opacity-50"
               >
-                {clearingData ? 'กำลังล้างข้อมูล...' : 'ยืนยันล้างข้อมูล (Admin)'}
+                {clearingData ? 'กำลังล้างข้อมูล...' : 'ยืนยันล้างข้อมูล'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Add / Edit Break Log (Full Unrestricted Control) */}
+      {editingBreakLog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 liquid-glass-modal-backdrop"
+          onClick={() => setEditingBreakLog(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-xl liquid-glass-strong rounded-3xl p-6"
+          >
+            <div className="flex items-center justify-between pb-4 border-b border-slate-300/60">
+              <h3 className="text-lg font-bold text-slate-900">
+                {isNewBreakLog
+                  ? 'เพิ่มบันทึกเวลาพักใหม่'
+                  : `แก้ไขบันทึกเวลาพัก (${editingBreakLog.employee_code})`}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setEditingBreakLog(null)}
+                className="text-slate-500 hover:text-slate-900 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveBreakLog} className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3.5 text-sm">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">พนักงาน *</label>
+                {isNewBreakLog ? (
+                  <select
+                    required
+                    value={editingBreakLog.employee_code}
+                    onChange={(e) =>
+                      setEditingBreakLog({ ...editingBreakLog, employee_code: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
+                  >
+                    {employees.map((emp) => (
+                      <option key={emp.id} value={emp.employee_code}>
+                        {emp.employee_code} · {emp.full_name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    disabled
+                    type="text"
+                    value={editingBreakLog.employee_code}
+                    className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-600 font-mono-tabular"
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">วันที่ *</label>
+                <input
+                  required
+                  type="date"
+                  value={editingBreakLog.work_date}
+                  onChange={(e) =>
+                    setEditingBreakLog({ ...editingBreakLog, work_date: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900 font-mono-tabular"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">ประเภทเวลาพัก</label>
+                <select
+                  value={editingBreakLog.break_type}
+                  onChange={(e) =>
+                    setEditingBreakLog({
+                      ...editingBreakLog,
+                      break_type: e.target.value as BreakType,
+                    })
+                  }
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
+                >
+                  <option value="break_1">พักช่วงแรก (30 นาที)</option>
+                  <option value="break_2">พักช่วงที่สอง (60 นาที)</option>
+                  <option value="quick_out">เข้า-ออกชั่วคราว (≤ 5 นาที)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">สถานะ</label>
+                <select
+                  value={editingBreakLog.status}
+                  onChange={(e) =>
+                    setEditingBreakLog({
+                      ...editingBreakLog,
+                      status: e.target.value as BreakStatus,
+                    })
+                  }
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
+                >
+                  <option value="active">กำลังพักอยู่</option>
+                  <option value="on_time">ตรงเวลา</option>
+                  <option value="grace">อนุโลม ≤ 5 นาที</option>
+                  <option value="overtime">เกิน 5 นาที</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">เวลาเริ่มพัก (HH:mm:ss)</label>
+                <input
+                  required
+                  type="time"
+                  step="1"
+                  value={editingBreakLog.start_time}
+                  onChange={(e) =>
+                    setEditingBreakLog({ ...editingBreakLog, start_time: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900 font-mono-tabular"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  เวลากลับเข้างาน {editingBreakLog.status === 'active' ? '(เว้นว่างเมื่อกำลังพัก)' : '(HH:mm:ss)'}
+                </label>
+                <input
+                  type="time"
+                  step="1"
+                  disabled={editingBreakLog.status === 'active'}
+                  value={editingBreakLog.status === 'active' ? '' : editingBreakLog.end_time}
+                  onChange={(e) =>
+                    setEditingBreakLog({ ...editingBreakLog, end_time: e.target.value })
+                  }
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900 font-mono-tabular disabled:opacity-50"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold text-slate-700 mb-1">หมายเหตุ</label>
+                <input
+                  type="text"
+                  value={editingBreakLog.note}
+                  onChange={(e) =>
+                    setEditingBreakLog({ ...editingBreakLog, note: e.target.value })
+                  }
+                  placeholder="ระบุหมายเหตุเพิ่มเติม..."
+                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
+                />
+              </div>
+
+              <div className="sm:col-span-2 flex justify-end gap-2 pt-3 border-t border-slate-300/60">
+                <button
+                  type="button"
+                  onClick={() => setEditingBreakLog(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-700 cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white shadow-sm cursor-pointer"
+                >
+                  บันทึกเวลาพัก
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1900,7 +2387,7 @@ export function AdminPortalView({
       {/* Modal: Add / Edit Employee (NO Contact Info / NO Shift, Multi-Option Status) */}
       {editingEmployee && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/45 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 liquid-glass-modal-backdrop"
           onClick={() => setEditingEmployee(null)}
         >
           <div

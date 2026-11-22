@@ -51,7 +51,7 @@ export function AdminDashboardOverview({
   calendarDays,
   onOpenEmployeeStats,
   onNavigateTab,
-  canClearData = false,
+  canClearData = true,
   onRequestClearAll,
 }: AdminDashboardOverviewProps) {
   const [nowTick, setNowTick] = useState(Date.now());
@@ -329,7 +329,7 @@ export function AdminDashboardOverview({
                   <div key={d.work_date} className="flex-1 min-w-[36px] flex flex-col items-center gap-1.5">
                     <span className="font-mono-tabular text-[11px] font-semibold text-slate-700">{d.total_breaks}</span>
                     <div
-                      className="w-full max-w-[30px] h-36 bg-slate-200/70 border border-slate-300/60 rounded-t-lg flex flex-col justify-end overflow-hidden"
+                      className="w-full max-w-[30px] h-36 bg-white/45 border border-white/65 rounded-t-lg flex flex-col justify-end overflow-hidden shadow-inner"
                       title={`${formatThaiDateLabel(d.work_date)}: ทั้งหมด ${d.total_breaks} ครั้ง (เกิน 5 น.: ${d.overtime_count})`}
                     >
                       {otH > 0 && (
@@ -471,7 +471,7 @@ export function AdminDashboardOverview({
                       <div className="text-[11px] font-semibold text-rose-700">เกิน 5 น.: {dept.overtime}</div>
                     </div>
                   </div>
-                  <div className="mt-2.5 h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                  <div className="mt-2.5 h-1.5 rounded-full bg-white/45 border border-white/65 overflow-hidden">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-sky-500 to-emerald-500"
                       style={{ width: `${rate}%` }}

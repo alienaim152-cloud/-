@@ -48,20 +48,28 @@ export function SunlitOfficeBackdrop({ mode = 'terminal' }: SunlitOfficeBackdrop
         />
       )}
 
-      {/* Bright warm sunlight & sky atmospheric scrim */}
+      {/* Subtle warm sunlight & sky atmospheric scrim preserving desk/window clarity */}
       <div
         className="absolute inset-0"
         style={{
           background:
-            'linear-gradient(135deg, rgba(255, 253, 244, 0.24) 0%, rgba(240, 249, 255, 0.14) 48%, rgba(224, 242, 254, 0.26) 100%)',
+            'linear-gradient(135deg, rgba(255, 253, 245, 0.14) 0%, rgba(240, 249, 255, 0.08) 48%, rgba(224, 242, 254, 0.18) 100%)',
         }}
       />
 
       {/* Soft top-left window sunbeam highlight */}
       <div
-        className="absolute -top-24 -left-24 w-[55vw] h-[55vw] rounded-full opacity-45 blur-3xl"
+        className="absolute -top-24 -left-24 w-[55vw] h-[55vw] rounded-full opacity-50 blur-3xl"
         style={{
-          background: 'radial-gradient(circle, rgba(254, 249, 195, 0.7) 0%, rgba(255, 255, 255, 0) 70%)',
+          background: 'radial-gradient(circle, rgba(254, 249, 195, 0.65) 0%, rgba(255, 255, 255, 0) 70%)',
+        }}
+      />
+
+      {/* Subtle bottom-right sky glass caustic */}
+      <div
+        className="absolute -bottom-32 -right-24 w-[45vw] h-[45vw] rounded-full opacity-40 blur-3xl"
+        style={{
+          background: 'radial-gradient(circle, rgba(186, 230, 253, 0.55) 0%, rgba(255, 255, 255, 0) 70%)',
         }}
       />
     </div>

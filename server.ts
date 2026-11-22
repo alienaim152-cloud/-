@@ -153,6 +153,11 @@ db.exec(`
     details TEXT DEFAULT '',
     created_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS system_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
 `);
 
 function recordAudit(actor: string, action: string, targetType: string, targetId = '', details = '') {
@@ -182,8 +187,14 @@ function seedInitialData() {
     recordAudit('SYSTEM', 'SEED_ADMIN', 'admin_users', defaultAdminUser, 'สร้างบัญชีผู้ดูแลระบบเริ่มต้น');
   }
 
+  const seededMeta = db.prepare("SELECT value FROM system_meta WHERE key = 'initial_seed_done'").get() as
+    | { value: string }
+    | undefined;
   const empCountRow = db.prepare('SELECT COUNT(*) as cnt FROM employees').get() as { cnt: number };
-  if (empCountRow.cnt === 0) {
+  if (!seededMeta && empCountRow.cnt > 0) {
+    db.prepare("INSERT OR REPLACE INTO system_meta (key, value) VALUES ('initial_seed_done', '1')").run();
+  }
+  if (!seededMeta && empCountRow.cnt === 0) {
     const now = new Date().toISOString();
     const starterEmployees = [
       { code: 'EMP001', name: 'ธนากร วัฒนศิริ', nick: 'ต้น', dept: 'ฝ่ายปฏิบัติการ', pos: 'หัวหน้าทีมควบคุมสายงาน', phone: '081-442-1091', email: 'thanakorn@company.co.th', shift: 'กะเช้า 08:30 - 17:30' },
@@ -373,6 +384,7 @@ function seedInitialData() {
       'เกินเวลาพักช่วงแรกมากกว่า 5 นาที (บันทึกอัตโนมัติ)',
       done2End.toISOString()
     );
+    db.prepare("INSERT OR REPLACE INTO system_meta (key, value) VALUES ('initial_seed_done', '1')").run();
   }
 }
 
@@ -462,7 +474,20 @@ const app = express();
 app.use(express.json({ limit: '5mb' }));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  try {
+    const pathname = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).pathname;
+    if (pathname === '/ws') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    }
+  } catch {
+    socket.destroy();
+  }
+});
 
 function broadcastEvent(type: string, extra: Record<string, unknown> = {}) {
   const payload = JSON.stringify({
@@ -707,6 +732,13 @@ app.get('/api/public/employee/:code', (req, res) => {
     work_date: string;
   }>;
 
+  const todayDate = getBangkokDateString();
+  const today_logs = db
+    .prepare(
+      `${BASE_LOG_SELECT} WHERE bl.employee_id = ? AND bl.work_date = ? ORDER BY bl.start_time DESC`
+    )
+    .all(employee.id, todayDate);
+
   const active_break = db
     .prepare(`${BASE_LOG_SELECT} WHERE bl.employee_id = ? AND bl.status = 'active' LIMIT 1`)
     .get(employee.id) || null;
@@ -714,42 +746,96 @@ app.get('/api/public/employee/:code', (req, res) => {
   let break_1_count = 0;
   let break_2_count = 0;
   let quick_out_count = 0;
+  let break_1_seconds = 0;
+  let break_1_completed = 0;
+  let break_2_seconds = 0;
+  let break_2_completed = 0;
+  let quick_out_seconds = 0;
+  let quick_out_completed = 0;
   let on_time_count = 0;
   let grace_count = 0;
   let overtime_count = 0;
   let total_seconds = 0;
+  let max_duration_seconds = 0;
   let total_exceeded_seconds = 0;
 
-  const dayMap = new Map<string, { work_date: string; total_seconds: number; breaks_count: number; overtime_count: number }>();
+  const dayMap = new Map<
+    string,
+    {
+      work_date: string;
+      total_seconds: number;
+      breaks_count: number;
+      on_time_count: number;
+      grace_count: number;
+      overtime_count: number;
+      on_time_seconds: number;
+      grace_seconds: number;
+      overtime_seconds: number;
+    }
+  >();
 
   for (const log of logs) {
     if (log.break_type === 'break_1') break_1_count++;
     else if (log.break_type === 'break_2') break_2_count++;
     else if (log.break_type === 'quick_out') quick_out_count++;
 
-    if (log.status === 'on_time') on_time_count++;
-    else if (log.status === 'grace') grace_count++;
-    else if (log.status === 'overtime' || log.violation_recorded === 1) overtime_count++;
+    const isOvertime = log.status === 'overtime' || log.violation_recorded === 1;
+    const isGrace = !isOvertime && log.status === 'grace';
+    const isOnTime = log.status === 'on_time';
 
+    if (isOnTime) on_time_count++;
+    else if (isGrace) grace_count++;
+    else if (isOvertime) overtime_count++;
+
+    const dur = log.status !== 'active' ? log.duration_seconds || 0 : 0;
     if (log.status !== 'active') {
-      total_seconds += log.duration_seconds || 0;
+      total_seconds += dur;
       total_exceeded_seconds += log.exceeded_seconds || 0;
+      if (dur > max_duration_seconds) max_duration_seconds = dur;
+
+      if (log.break_type === 'break_1') {
+        break_1_seconds += dur;
+        break_1_completed++;
+      } else if (log.break_type === 'break_2') {
+        break_2_seconds += dur;
+        break_2_completed++;
+      } else if (log.break_type === 'quick_out') {
+        quick_out_seconds += dur;
+        quick_out_completed++;
+      }
     }
 
     const existing = dayMap.get(log.work_date) || {
       work_date: log.work_date,
       total_seconds: 0,
       breaks_count: 0,
+      on_time_count: 0,
+      grace_count: 0,
       overtime_count: 0,
+      on_time_seconds: 0,
+      grace_seconds: 0,
+      overtime_seconds: 0,
     };
     existing.breaks_count += 1;
-    if (log.status !== 'active') existing.total_seconds += log.duration_seconds || 0;
-    if (log.status === 'overtime' || log.violation_recorded === 1) existing.overtime_count += 1;
+    if (log.status !== 'active') {
+      existing.total_seconds += dur;
+      if (isOvertime) {
+        existing.overtime_count += 1;
+        existing.overtime_seconds += dur;
+      } else if (isGrace) {
+        existing.grace_count += 1;
+        existing.grace_seconds += dur;
+      } else {
+        existing.on_time_count += 1;
+        existing.on_time_seconds += dur;
+      }
+    }
     dayMap.set(log.work_date, existing);
   }
 
   const completed = on_time_count + grace_count + overtime_count;
   const compliant = on_time_count + grace_count;
+  const active_days = dayMap.size;
 
   const daily_series = Array.from(dayMap.values())
     .sort((a, b) => a.work_date.localeCompare(b.work_date))
@@ -757,27 +843,41 @@ app.get('/api/public/employee/:code', (req, res) => {
       work_date: d.work_date,
       total_minutes: Math.round(d.total_seconds / 60),
       breaks_count: d.breaks_count,
+      on_time_count: d.on_time_count,
+      grace_count: d.grace_count,
       overtime_count: d.overtime_count,
+      on_time_minutes: Math.round(d.on_time_seconds / 60),
+      grace_minutes: Math.round(d.grace_seconds / 60),
+      overtime_minutes: Math.round(d.overtime_seconds / 60),
     }));
 
   res.json({
     employee,
     month: monthParam,
+    today_date: todayDate,
     summary: {
       total_breaks: logs.length,
+      active_days,
+      today_breaks_count: today_logs.length,
+      avg_breaks_per_day: active_days > 0 ? Math.round((logs.length / active_days) * 10) / 10 : 0,
       break_1_count,
       break_2_count,
       quick_out_count,
+      avg_break_1_minutes: break_1_completed > 0 ? Math.round(break_1_seconds / 60 / break_1_completed) : 0,
+      avg_break_2_minutes: break_2_completed > 0 ? Math.round(break_2_seconds / 60 / break_2_completed) : 0,
+      avg_quick_out_minutes: quick_out_completed > 0 ? Math.round(quick_out_seconds / 60 / quick_out_completed) : 0,
       on_time_count,
       grace_count,
       overtime_count,
       total_minutes: Math.round(total_seconds / 60),
       avg_minutes: completed > 0 ? Math.round(total_seconds / 60 / completed) : 0,
+      max_duration_seconds,
       total_exceeded_seconds,
       punctuality_rate: completed > 0 ? Math.round((compliant / completed) * 100) : 100,
     },
     daily_series,
     recent_logs: logs,
+    today_logs,
     active_break,
   });
 });
@@ -1123,8 +1223,8 @@ app.post('/api/admin/employees/bulk-status', requireAdmin(['super_admin', 'super
   res.json({ updated: info.changes });
 });
 
-// Admin-only Clear Data Endpoint (super_admin ONLY)
-app.delete('/api/admin/clear', requireAdmin(['super_admin']), (req: AuthedRequest, res) => {
+// Unrestricted Clear Data Endpoint (Full Access)
+app.delete('/api/admin/clear', requireAdmin(), (req: AuthedRequest, res) => {
   const scope = String(req.query.scope || '').trim();
   const dateParam = typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date) ? req.query.date : '';
   const monthParam = typeof req.query.month === 'string' && /^\d{4}-\d{2}$/.test(req.query.month) ? req.query.month : '';
@@ -1189,8 +1289,9 @@ app.post('/api/admin/employees/import', requireAdmin(['super_admin', 'supervisor
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
+  const affectedCodes: string[] = [];
 
-  const findStmt = db.prepare('SELECT id FROM employees WHERE UPPER(employee_code) = ?');
+  const findStmt = db.prepare('SELECT * FROM employees WHERE UPPER(employee_code) = ?');
   const insertStmt = db.prepare(
     `INSERT INTO employees (employee_code, full_name, nickname, department, position, phone, email, shift_name, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -1210,36 +1311,84 @@ app.post('/api/admin/employees/import', requireAdmin(['super_admin', 'supervisor
         continue;
       }
       const nickname = String(item.nickname || '').trim();
-      const department = String(item.department || 'ทั่วไป').trim() || 'ทั่วไป';
-      const position = String(item.position || 'พนักงาน').trim() || 'พนักงาน';
+      const rawDepartment = String(item.department || '').trim();
+      const rawPosition = String(item.position || '').trim();
       const phone = String(item.phone || '').trim();
       const email = String(item.email || '').trim();
       const shiftName = String(item.shift_name || '').trim();
       const allowedStatuses = ['active', 'on_leave', 'training', 'suspended', 'removed', 'inactive'];
-      const rawStatus = String(item.status || 'active').trim().toLowerCase();
-      const status = allowedStatuses.includes(rawStatus) ? rawStatus : 'active';
+      const rawStatus = String(item.status || '').trim().toLowerCase();
+      const validStatus = allowedStatuses.includes(rawStatus) ? rawStatus : '';
 
-      const found = findStmt.get(code) as { id: number } | undefined;
+      const found = findStmt.get(code) as
+        | {
+            id: number;
+            full_name: string;
+            nickname: string;
+            department: string;
+            position: string;
+            phone: string;
+            email: string;
+            shift_name: string;
+            status: string;
+          }
+        | undefined;
       if (found) {
-        updateStmt.run(fullName, nickname, department, position, phone, email, shiftName, status, now, found.id);
+        // Preserve existing non-empty values whenever the imported file omits them
+        const nextDept = item.has_department === false ? found.department : rawDepartment || found.department || 'ทั่วไป';
+        const nextPos = item.has_position === false ? found.position : rawPosition || found.position || 'พนักงาน';
+        const nextStatus =
+          item.has_status === false ? found.status : validStatus || found.status || 'active';
+        updateStmt.run(
+          fullName || found.full_name,
+          nickname || found.nickname || '',
+          nextDept,
+          nextPos,
+          phone || found.phone || '',
+          email || found.email || '',
+          shiftName || found.shift_name || '',
+          nextStatus,
+          now,
+          found.id
+        );
+        affectedCodes.push(code);
         updated++;
       } else {
-        insertStmt.run(code, fullName, nickname, department, position, phone, email, shiftName, status, now, now);
+        insertStmt.run(
+          code,
+          fullName,
+          nickname,
+          rawDepartment || 'ทั่วไป',
+          rawPosition || 'พนักงาน',
+          phone,
+          email,
+          shiftName,
+          validStatus || 'active',
+          now,
+          now
+        );
+        affectedCodes.push(code);
         inserted++;
       }
     }
   });
 
   tx(rows);
+  const placeholders = affectedCodes.map(() => '?').join(',');
+  const affectedEmployees =
+    affectedCodes.length > 0
+      ? db.prepare(`SELECT * FROM employees WHERE employee_code IN (${placeholders}) ORDER BY employee_code ASC`).all(...affectedCodes)
+      : [];
+
   recordAudit(
     req.adminUser!.username,
     'IMPORT_EMPLOYEES',
     'employees',
     'BULK',
-    `นำเข้าพนักงานจากไฟล์: เพิ่มใหม่ ${inserted} คน, อัปเดต ${updated} คน, ข้าม ${skipped} รายการ`
+    `นำเข้าพนักงานจากไฟล์: เพิ่มใหม่ ${inserted} คน, อัปเดตเพิ่มเติม ${updated} คน, ข้าม ${skipped} รายการ`
   );
   broadcastEvent('employees:updated');
-  res.json({ inserted, updated, skipped });
+  res.json({ inserted, updated, skipped, employees: affectedEmployees });
 });
 
 app.get('/api/admin/logs', requireAdmin(), (req, res) => {
@@ -1279,22 +1428,150 @@ app.get('/api/admin/logs', requireAdmin(), (req, res) => {
   res.json({ logs });
 });
 
-app.put('/api/admin/logs/:id', requireAdmin(['super_admin', 'supervisor']), (req: AuthedRequest, res) => {
+app.post('/api/admin/logs', requireAdmin(), (req: AuthedRequest, res) => {
+  const rawCode = String(req.body?.employee_code || '').trim().toUpperCase();
+  const breakType = String(req.body?.break_type || 'break_1').trim();
+  const workDateInput = String(req.body?.work_date || '').trim();
+  const workDate = /^\d{4}-\d{2}-\d{2}$/.test(workDateInput) ? workDateInput : getBangkokDateString();
+  const startRaw = String(req.body?.start_time || '').trim();
+  const endRaw = String(req.body?.end_time || '').trim();
+  const requestedStatus = String(req.body?.status || '').trim();
+  const note = String(req.body?.note || '').trim().slice(0, 300);
+
+  if (!rawCode) {
+    res.status(400).json({ error: 'กรุณาระบุรหัสพนักงาน' });
+    return;
+  }
+  if (!['break_1', 'break_2', 'quick_out'].includes(breakType)) {
+    res.status(400).json({ error: 'ประเภทเวลาพักไม่ถูกต้อง' });
+    return;
+  }
+
+  const employee = db
+    .prepare('SELECT id, employee_code FROM employees WHERE UPPER(employee_code) = ?')
+    .get(rawCode) as { id: number; employee_code: string } | undefined;
+  if (!employee) {
+    res.status(404).json({ error: `ไม่พบรหัสพนักงาน ${rawCode}` });
+    return;
+  }
+
+  const parseTimestamp = (raw: string, fallbackIso: string): string => {
+    if (!raw) return fallbackIso;
+    if (/^\d{2}:\d{2}(:\d{2})?$/.test(raw)) {
+      const normalized = raw.length === 5 ? `${raw}:00` : raw;
+      const d = new Date(`${workDate}T${normalized}+07:00`);
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
+    }
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? fallbackIso : d.toISOString();
+  };
+
+  const nowIso = new Date().toISOString();
+  const startIso = parseTimestamp(startRaw, nowIso);
+  const allowedMinutes = breakType === 'break_1' ? 30 : breakType === 'break_2' ? 60 : 5;
+  const graceMinutes = breakType === 'quick_out' ? 0 : 5;
+
+  const isActive = requestedStatus === 'active' || (!endRaw && requestedStatus === '');
+  let endIso: string | null = null;
+  let durationSeconds = 0;
+  let exceededSeconds = 0;
+  let graceExceeded = 0;
+  let violationRecorded = 0;
+  let finalStatus: 'active' | 'on_time' | 'grace' | 'overtime' = 'active';
+
+  if (!isActive) {
+    endIso = parseTimestamp(endRaw, nowIso);
+    durationSeconds = Math.max(
+      1,
+      Math.floor((new Date(endIso).getTime() - new Date(startIso).getTime()) / 1000)
+    );
+    const allowedSeconds = allowedMinutes * 60;
+    const maxWithGrace = (allowedMinutes + graceMinutes) * 60;
+    exceededSeconds = Math.max(0, durationSeconds - allowedSeconds);
+    graceExceeded = durationSeconds > maxWithGrace ? 1 : 0;
+    violationRecorded = graceExceeded;
+    if (['on_time', 'grace', 'overtime'].includes(requestedStatus)) {
+      finalStatus = requestedStatus as 'on_time' | 'grace' | 'overtime';
+      if (finalStatus === 'overtime') {
+        graceExceeded = 1;
+        violationRecorded = 1;
+      } else {
+        graceExceeded = 0;
+        violationRecorded = 0;
+      }
+    } else {
+      finalStatus = graceExceeded ? 'overtime' : exceededSeconds > 0 ? 'grace' : 'on_time';
+    }
+  }
+
+  const info = db
+    .prepare(
+      `INSERT INTO break_logs (
+        employee_id, employee_code, break_type, allowed_minutes, grace_minutes,
+        work_date, start_time, end_time, duration_seconds, exceeded_seconds,
+        grace_exceeded, violation_recorded, status, note, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      employee.id,
+      employee.employee_code,
+      breakType,
+      allowedMinutes,
+      graceMinutes,
+      workDate,
+      startIso,
+      endIso,
+      durationSeconds,
+      exceededSeconds,
+      graceExceeded,
+      violationRecorded,
+      finalStatus,
+      note,
+      nowIso
+    );
+
+  const created = db.prepare(`${BASE_LOG_SELECT} WHERE bl.id = ?`).get(info.lastInsertRowid);
+  recordAudit(
+    req.adminUser!.username,
+    'CREATE_BREAK_LOG',
+    'break_logs',
+    String(info.lastInsertRowid),
+    `เพิ่มบันทึกเวลาพักของ ${employee.employee_code} (${workDate})`
+  );
+  broadcastEvent('logs:updated', { record: created });
+  res.status(201).json({ record: created });
+});
+
+app.put('/api/admin/logs/:id', requireAdmin(), (req: AuthedRequest, res) => {
   const logId = Number(req.params.id);
   const existing = db.prepare('SELECT * FROM break_logs WHERE id = ?').get(logId) as
-    | { id: number; employee_code: string; status: string; allowed_minutes: number; grace_minutes: number; start_time: string }
+    | {
+        id: number;
+        employee_code: string;
+        break_type: string;
+        work_date: string;
+        status: string;
+        allowed_minutes: number;
+        grace_minutes: number;
+        start_time: string;
+        end_time: string | null;
+        note: string;
+      }
     | undefined;
   if (!existing) {
     res.status(404).json({ error: 'ไม่พบบันทึกเวลาพัก' });
     return;
   }
 
-  const note = String(req.body?.note ?? '').trim().slice(0, 300);
+  const note = req.body?.note !== undefined ? String(req.body.note).trim().slice(0, 300) : existing.note;
   const forceEnd = Boolean(req.body?.force_end);
 
   if (forceEnd && existing.status === 'active') {
     const endNow = new Date();
-    const durationSeconds = Math.max(1, Math.floor((endNow.getTime() - new Date(existing.start_time).getTime()) / 1000));
+    const durationSeconds = Math.max(
+      1,
+      Math.floor((endNow.getTime() - new Date(existing.start_time).getTime()) / 1000)
+    );
     const allowedSeconds = existing.allowed_minutes * 60;
     const maxWithGrace = (existing.allowed_minutes + existing.grace_minutes) * 60;
     const exceededSeconds = Math.max(0, durationSeconds - allowedSeconds);
@@ -1317,14 +1594,119 @@ app.put('/api/admin/logs/:id', requireAdmin(['super_admin', 'supervisor']), (req
       endNow.toISOString(),
       logId
     );
-    recordAudit(req.adminUser!.username, 'FORCE_END_BREAK', 'break_logs', String(logId), `ปิดรอบพักของ ${existing.employee_code}`);
+    recordAudit(
+      req.adminUser!.username,
+      'FORCE_END_BREAK',
+      'break_logs',
+      String(logId),
+      `ปิดรอบพักของ ${existing.employee_code}`
+    );
   } else {
-    db.prepare('UPDATE break_logs SET note = ? WHERE id = ?').run(note, logId);
-    recordAudit(req.adminUser!.username, 'UPDATE_LOG_NOTE', 'break_logs', String(logId), `แก้ไขหมายเหตุบันทึก #${logId}`);
+    const nextBreakType =
+      req.body?.break_type && ['break_1', 'break_2', 'quick_out'].includes(String(req.body.break_type))
+        ? String(req.body.break_type)
+        : existing.break_type;
+    const nextWorkDate =
+      typeof req.body?.work_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.work_date)
+        ? req.body.work_date
+        : existing.work_date;
+
+    const parseTimestamp = (raw: unknown, fallbackIso: string): string => {
+      const s = String(raw || '').trim();
+      if (!s) return fallbackIso;
+      if (/^\d{2}:\d{2}(:\d{2})?$/.test(s)) {
+        const normalized = s.length === 5 ? `${s}:00` : s;
+        const d = new Date(`${nextWorkDate}T${normalized}+07:00`);
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      }
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? fallbackIso : d.toISOString();
+    };
+
+    const nextStartTime =
+      req.body?.start_time !== undefined
+        ? parseTimestamp(req.body.start_time, existing.start_time)
+        : existing.start_time;
+
+    const allowedMinutes = nextBreakType === 'break_1' ? 30 : nextBreakType === 'break_2' ? 60 : 5;
+    const graceMinutes = nextBreakType === 'quick_out' ? 0 : 5;
+
+    const requestedStatus =
+      req.body?.status && ['active', 'on_time', 'grace', 'overtime'].includes(String(req.body.status))
+        ? String(req.body.status)
+        : existing.status;
+
+    if (requestedStatus === 'active') {
+      db.prepare(
+        `UPDATE break_logs
+         SET break_type = ?, allowed_minutes = ?, grace_minutes = ?, work_date = ?,
+             start_time = ?, end_time = NULL, duration_seconds = 0, exceeded_seconds = 0,
+             grace_exceeded = 0, violation_recorded = 0, status = 'active', note = ?, recorded_at = ?
+         WHERE id = ?`
+      ).run(
+        nextBreakType,
+        allowedMinutes,
+        graceMinutes,
+        nextWorkDate,
+        nextStartTime,
+        note,
+        new Date().toISOString(),
+        logId
+      );
+    } else {
+      const fallbackEnd = existing.end_time || new Date().toISOString();
+      const nextEndTime =
+        req.body?.end_time !== undefined ? parseTimestamp(req.body.end_time, fallbackEnd) : fallbackEnd;
+      const durationSeconds = Math.max(
+        1,
+        Math.floor((new Date(nextEndTime).getTime() - new Date(nextStartTime).getTime()) / 1000)
+      );
+      const allowedSeconds = allowedMinutes * 60;
+      const maxWithGrace = (allowedMinutes + graceMinutes) * 60;
+      const exceededSeconds = Math.max(0, durationSeconds - allowedSeconds);
+
+      let finalStatus = requestedStatus;
+      if (req.body?.status === undefined && (req.body?.start_time !== undefined || req.body?.end_time !== undefined || req.body?.break_type !== undefined)) {
+        finalStatus =
+          durationSeconds > maxWithGrace ? 'overtime' : exceededSeconds > 0 ? 'grace' : 'on_time';
+      }
+      const isOvertime = finalStatus === 'overtime' ? 1 : 0;
+
+      db.prepare(
+        `UPDATE break_logs
+         SET break_type = ?, allowed_minutes = ?, grace_minutes = ?, work_date = ?,
+             start_time = ?, end_time = ?, duration_seconds = ?, exceeded_seconds = ?,
+             grace_exceeded = ?, violation_recorded = ?, status = ?, note = ?, recorded_at = ?
+         WHERE id = ?`
+      ).run(
+        nextBreakType,
+        allowedMinutes,
+        graceMinutes,
+        nextWorkDate,
+        nextStartTime,
+        nextEndTime,
+        durationSeconds,
+        exceededSeconds,
+        isOvertime,
+        isOvertime,
+        finalStatus,
+        note,
+        new Date().toISOString(),
+        logId
+      );
+    }
+
+    recordAudit(
+      req.adminUser!.username,
+      'UPDATE_BREAK_LOG',
+      'break_logs',
+      String(logId),
+      `แก้ไขบันทึกเวลาพักของ ${existing.employee_code} (#${logId})`
+    );
   }
 
   const updated = db.prepare(`${BASE_LOG_SELECT} WHERE bl.id = ?`).get(logId);
-  broadcastEvent('logs:updated');
+  broadcastEvent('logs:updated', { record: updated });
   res.json({ record: updated });
 });
 
@@ -1403,11 +1785,6 @@ app.put('/api/admin/users/:id', requireAdmin(['super_admin']), (req: AuthedReque
   const isActive = req.body?.is_active !== undefined ? (req.body.is_active ? 1 : 0) : undefined;
   const newPassword = req.body?.password ? String(req.body.password) : '';
 
-  if (existing.username.toLowerCase() === 'admin' && isActive === 0) {
-    res.status(400).json({ error: 'ไม่สามารถปิดการใช้งานบัญชี Admin หลักได้' });
-    return;
-  }
-
   if (displayName) {
     db.prepare('UPDATE admin_users SET display_name = ? WHERE id = ?').run(displayName, uid);
   }
@@ -1432,9 +1809,29 @@ app.put('/api/admin/users/:id', requireAdmin(['super_admin']), (req: AuthedReque
   res.json({ user: updated });
 });
 
+app.delete('/api/admin/users/:id', requireAdmin(), (req: AuthedRequest, res) => {
+  const uid = Number(req.params.id);
+  const existing = db.prepare('SELECT username FROM admin_users WHERE id = ?').get(uid) as
+    | { username: string }
+    | undefined;
+  if (!existing) {
+    res.status(404).json({ error: 'ไม่พบบัญชีผู้ใช้งาน' });
+    return;
+  }
+  db.prepare('DELETE FROM admin_users WHERE id = ?').run(uid);
+  recordAudit(req.adminUser!.username, 'DELETE_ADMIN_USER', 'admin_users', existing.username, 'ลบบัญชีผู้ใช้งาน');
+  res.json({ success: true });
+});
+
 app.get('/api/admin/audit', requireAdmin(), (_req, res) => {
   const logs = db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 250').all();
   res.json({ logs });
+});
+
+app.delete('/api/admin/audit/:id', requireAdmin(), (_req, res) => {
+  const id = Number(_req.params.id);
+  db.prepare('DELETE FROM audit_logs WHERE id = ?').run(id);
+  res.json({ success: true });
 });
 
 // ==========================================
@@ -1444,9 +1841,84 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: process.env.DISABLE_HMR === 'true' ? false : { server },
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server },
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
       appType: 'spa',
     });
+    if (process.env.DISABLE_HMR === 'true') {
+      app.get('/@vite/client', (_req, res) => {
+        res.type('application/javascript').send(`
+const sheetsMap = new Map();
+const linkSheetsMap = new Map();
+if (typeof document !== 'undefined') {
+  document.querySelectorAll('style[data-vite-dev-id]').forEach((el) => {
+    sheetsMap.set(el.getAttribute('data-vite-dev-id'), el);
+  });
+  document.querySelectorAll('link[rel="stylesheet"][data-vite-dev-id]').forEach((el) => {
+    linkSheetsMap.set(el.getAttribute('data-vite-dev-id'), el);
+  });
+}
+let lastInsertedStyle;
+export function updateStyle(id, content) {
+  if (linkSheetsMap.has(id)) return;
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    if (!lastInsertedStyle) {
+      document.head.appendChild(style);
+      setTimeout(() => { lastInsertedStyle = undefined; }, 0);
+    } else {
+      lastInsertedStyle.insertAdjacentElement('afterend', style);
+    }
+    lastInsertedStyle = style;
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+export function removeStyle(id) {
+  if (linkSheetsMap.has(id)) {
+    document.querySelectorAll(\`link[rel="stylesheet"][data-vite-dev-id="\${CSS.escape(id)}"]\`).forEach((el) => el.remove());
+    linkSheetsMap.delete(id);
+  }
+  const style = sheetsMap.get(id);
+  if (style && style.parentNode) {
+    style.parentNode.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+const noop = () => {};
+export function createHotContext() {
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop,
+  };
+}
+export function injectQuery(url, queryToInject) {
+  if (url[0] !== '.' && url[0] !== '/') return url;
+  const pathname = url.replace(/[?#].*$/, '');
+  const { search, hash } = new URL(url, 'http://vite.dev');
+  return \`\${pathname}?\${queryToInject}\${search ? '&' + search.slice(1) : ''}\${hash || ''}\`;
+}
+export class ErrorOverlay {}
+`);
+      });
+    }
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');

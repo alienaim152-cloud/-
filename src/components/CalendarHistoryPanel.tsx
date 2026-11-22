@@ -29,7 +29,7 @@ export function CalendarHistoryPanel({
   onMonthChange,
   calendarDays,
   onSelectEmployeeCode,
-  canClearData = false,
+  canClearData = true,
   onClearDate,
   realtimeSignal = 0,
 }: CalendarHistoryPanelProps) {
@@ -52,7 +52,7 @@ export function CalendarHistoryPanel({
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    setLoading((prev) => (historyLogs.length === 0 ? true : prev));
     fetch(`/api/public/history?date=${encodeURIComponent(selectedDate)}`)
       .then((r) => r.json())
       .then((data) => {
@@ -62,9 +62,7 @@ export function CalendarHistoryPanel({
         }
       })
       .catch(() => {
-        if (!cancelled) {
-          setHistoryLogs([]);
-        }
+        // Keep existing logs if transient fetch error occurs
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -301,9 +299,9 @@ export function CalendarHistoryPanel({
         </div>
 
         {/* Table */}
-        <div className="overflow-x-auto max-h-[400px] overflow-y-auto rounded-2xl border border-slate-300/60 bg-white/55">
+        <div className="overflow-x-auto max-h-[400px] overflow-y-auto rounded-2xl liquid-glass-table">
           <table className="w-full text-left border-collapse text-sm">
-            <thead className="bg-white/85 sticky top-0 text-xs text-slate-700 border-b border-slate-300/60">
+            <thead className="liquid-glass-thead sticky top-0 text-xs text-slate-700 border-b border-white/60">
               <tr>
                 <th className="py-2.5 px-3 font-semibold">พนักงาน</th>
                 <th className="py-2.5 px-3 font-semibold">ประเภท</th>

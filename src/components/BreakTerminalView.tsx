@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   AlertTriangle,
@@ -29,6 +29,7 @@ interface BreakTerminalViewProps {
   serverTimeOffsetMs: number;
   wsConnected: boolean;
   onRefreshLive: () => void;
+  onUpsertBreakRecord?: (record: BreakLogRecord) => void;
   onOpenAdminPortal: () => void;
 }
 
@@ -37,6 +38,7 @@ export function BreakTerminalView({
   serverTimeOffsetMs,
   wsConnected,
   onRefreshLive,
+  onUpsertBreakRecord,
   onOpenAdminPortal,
 }: BreakTerminalViewProps) {
   const [employeeCodeInput, setEmployeeCodeInput] = useState('');
@@ -46,6 +48,7 @@ export function BreakTerminalView({
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [nowTick, setNowTick] = useState(Date.now());
   const [actionHovered, setActionHovered] = useState(false);
+  const empInputRef = useRef<HTMLInputElement | null>(null);
 
   // 1-second precision clock synced with server time
   useEffect(() => {
@@ -76,14 +79,16 @@ export function BreakTerminalView({
     return liveData.active_breaks.find((b) => b.employee_code.toUpperCase() === normalizedInputCode);
   }, [liveData.active_breaks, normalizedInputCode]);
 
-  const handleClockSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const submitBreakRecord = useCallback(async (overrideBreakType?: BreakType) => {
+    if (submitting) return;
     setFeedback(null);
     if (!normalizedInputCode) {
       setFeedback({ type: 'error', text: 'กรุณากรอกรหัสพนักงานก่อนบันทึกเวลา' });
+      empInputRef.current?.focus();
       return;
     }
 
+    const effectiveBreakType = overrideBreakType ?? selectedBreakType;
     setSubmitting(true);
     try {
       if (matchedActiveBreak) {
@@ -103,15 +108,21 @@ export function BreakTerminalView({
           type: rec.status === 'overtime' ? 'error' : 'success',
           text: `${rec.employee_code} ${rec.full_name} กลับเข้าปฏิบัติงานแล้ว · ใช้เวลา ${formatDurationThai(rec.duration_seconds)} (${st.label})`,
         });
+        setEmployeeCodeInput('');
         setNoteInput('');
-        onRefreshLive();
+        if (onUpsertBreakRecord) {
+          onUpsertBreakRecord(rec);
+        } else {
+          onRefreshLive();
+        }
+        window.setTimeout(() => empInputRef.current?.focus(), 0);
       } else {
         const res = await fetch('/api/public/break/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             employee_code: normalizedInputCode,
-            break_type: selectedBreakType,
+            break_type: effectiveBreakType,
             note: noteInput.trim(),
           }),
         });
@@ -125,13 +136,59 @@ export function BreakTerminalView({
           type: 'success',
           text: `บันทึกเริ่ม${getBreakTypeLabel(rec.break_type)} ให้ ${rec.employee_code} (${rec.full_name}) เรียบร้อยแล้ว`,
         });
+        setEmployeeCodeInput('');
         setNoteInput('');
-        onRefreshLive();
+        if (onUpsertBreakRecord) {
+          onUpsertBreakRecord(rec);
+        } else {
+          onRefreshLive();
+        }
+        window.setTimeout(() => empInputRef.current?.focus(), 0);
       }
     } catch {
       setFeedback({ type: 'error', text: 'ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้' });
     } finally {
       setSubmitting(false);
+    }
+  }, [
+    matchedActiveBreak,
+    normalizedInputCode,
+    noteInput,
+    onRefreshLive,
+    onUpsertBreakRecord,
+    selectedBreakType,
+    submitting,
+  ]);
+
+  const handleClockSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    void submitBreakRecord();
+  };
+
+  // Auto-focus employee ID input on load & allow Enter from body when code is ready
+  useEffect(() => {
+    empInputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    const onWindowKeyDown = (ev: globalThis.KeyboardEvent) => {
+      if (ev.key !== 'Enter' || ev.isComposing || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) {
+        return;
+      }
+      const activeEl = document.activeElement;
+      if (activeEl === document.body && normalizedInputCode) {
+        ev.preventDefault();
+        void submitBreakRecord();
+      }
+    };
+    window.addEventListener('keydown', onWindowKeyDown);
+    return () => window.removeEventListener('keydown', onWindowKeyDown);
+  }, [normalizedInputCode, submitBreakRecord]);
+
+  const handleControlEnter = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing && !e.shiftKey) {
+      e.preventDefault();
+      void submitBreakRecord();
     }
   };
 
@@ -153,7 +210,11 @@ export function BreakTerminalView({
         type: rec.status === 'overtime' ? 'error' : 'success',
         text: `${rec.employee_code} ${rec.full_name} กลับเข้าปฏิบัติงานแล้ว (${formatDurationThai(rec.duration_seconds)})`,
       });
-      onRefreshLive();
+      if (onUpsertBreakRecord) {
+        onUpsertBreakRecord(rec);
+      } else {
+        onRefreshLive();
+      }
     } catch {
       setFeedback({ type: 'error', text: 'เกิดข้อผิดพลาดในการเชื่อมต่อ' });
     }
@@ -187,14 +248,14 @@ export function BreakTerminalView({
 
   return (
     <div className="relative z-10 min-h-screen flex flex-col justify-between px-4 py-5 sm:px-6">
-      {/* Floating Liquid Glass Top Bar */}
+      {/* Floating Liquid Glass Capsule Top Bar */}
       <header className="max-w-[1280px] w-full mx-auto">
-        <div className="liquid-glass rounded-2xl px-5 py-3 flex items-center justify-between gap-6">
+        <div className="liquid-glass rounded-full px-5 sm:px-6 py-2.5 flex items-center justify-between gap-8">
           <span className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
             BreakSync
           </span>
 
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-600 font-medium">
+          <div className="hidden md:flex items-center gap-2.5 text-xs text-slate-700 font-medium whitespace-nowrap">
             <span>จุดลงเวลาพักเข้า-ออกพนักงาน</span>
             <span aria-hidden="true">·</span>
             <span>{formatThaiDateLabel(liveData.today_date)}</span>
@@ -208,7 +269,7 @@ export function BreakTerminalView({
             <button
               type="button"
               onClick={onOpenAdminPortal}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 shadow-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="liquid-glass-btn-primary inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold text-white cursor-pointer whitespace-nowrap shrink-0"
             >
               <Shield className="w-3.5 h-3.5" />
               ระบบหลังบ้าน Admin
@@ -218,7 +279,7 @@ export function BreakTerminalView({
               target="_blank"
               rel="noopener noreferrer"
               title="เปิดระบบหลังบ้านในหน้าต่างใหม่"
-              className="p-2 rounded-xl text-slate-700 liquid-glass-card hover:bg-white/90 transition-colors shrink-0"
+              className="p-2 rounded-full text-slate-700 liquid-glass-card shrink-0"
               aria-label="เปิดระบบหลังบ้านในหน้าต่างใหม่"
             >
               <ExternalLink className="w-3.5 h-3.5" />
@@ -274,18 +335,35 @@ export function BreakTerminalView({
                   </label>
                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
                     <div className="sm:col-span-7 relative">
-                      <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                      <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
+                        ref={empInputRef}
                         id="emp-code-input"
                         type="text"
+                        autoFocus
+                        autoComplete="off"
                         value={employeeCodeInput}
                         onChange={(e) => {
                           setEmployeeCodeInput(e.target.value.toUpperCase());
                           setFeedback(null);
                         }}
-                        placeholder="กรอกรหัสพนักงาน เช่น EMP001"
-                        className="w-full pl-10 pr-4 py-3.5 rounded-2xl liquid-glass-input text-base font-mono-tabular font-semibold text-slate-900 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400 focus:outline-none transition-all"
+                        onKeyDown={handleControlEnter}
+                        placeholder="กรอกรหัสพนักงาน เช่น EMP001 แล้วกด Enter"
+                        className="w-full pl-10 pr-16 py-3.5 rounded-2xl liquid-glass-input text-base font-mono-tabular font-semibold text-slate-900 placeholder:font-sans placeholder:font-normal placeholder:text-slate-500 focus:outline-none"
                       />
+                      {employeeCodeInput && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEmployeeCodeInput('');
+                            setFeedback(null);
+                            empInputRef.current?.focus();
+                          }}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 px-2 py-1 rounded-lg text-[11px] font-semibold text-slate-600 hover:text-slate-900 hover:bg-white/70 transition-colors cursor-pointer"
+                        >
+                          ล้าง
+                        </button>
+                      )}
                     </div>
                     <div className="sm:col-span-5">
                       <select
@@ -294,6 +372,15 @@ export function BreakTerminalView({
                         onChange={(e) => {
                           setEmployeeCodeInput(e.target.value);
                           setFeedback(null);
+                          if (e.target.value) {
+                            window.setTimeout(() => empInputRef.current?.focus(), 0);
+                          }
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && normalizedInputCode) {
+                            e.preventDefault();
+                            void submitBreakRecord();
+                          }
                         }}
                         className="w-full h-full px-3.5 py-3.5 rounded-2xl liquid-glass-input text-sm text-slate-800 focus:outline-none"
                       >
@@ -360,14 +447,24 @@ export function BreakTerminalView({
                           <motion.button
                             key={opt.type}
                             type="button"
-                            onClick={() => setSelectedBreakType(opt.type)}
+                            onClick={() => {
+                              setSelectedBreakType(opt.type);
+                              empInputRef.current?.focus();
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && normalizedInputCode) {
+                                e.preventDefault();
+                                setSelectedBreakType(opt.type);
+                                void submitBreakRecord(opt.type);
+                              }
+                            }}
                             whileHover={{ y: -2 }}
                             whileTap={{ scale: 0.985 }}
                             transition={{ duration: 0.15 }}
                             className={`p-4 rounded-2xl text-left border transition-all cursor-pointer ${
                               selected
-                                ? 'bg-sky-600/15 border-sky-600/70 text-slate-900 shadow-sm'
-                                : 'liquid-glass-card text-slate-700 hover:border-sky-400/70 hover:bg-white/80'
+                                ? 'bg-white/80 border-sky-500/80 text-slate-900 shadow-[inset_0_1.5px_0_rgba(255,255,255,1),0_10px_24px_-8px_rgba(14,165,233,0.3)] backdrop-blur-xl'
+                                : 'liquid-glass-card text-slate-700'
                             }`}
                           >
                             <div className="flex items-center justify-between gap-2">
@@ -393,6 +490,7 @@ export function BreakTerminalView({
                     type="text"
                     value={noteInput}
                     onChange={(e) => setNoteInput(e.target.value)}
+                    onKeyDown={handleControlEnter}
                     placeholder="หมายเหตุเพิ่มเติม (ถ้ามี) เช่น ติดต่อคลังสินค้า..."
                     className="w-full px-4 py-3 rounded-2xl liquid-glass-input text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none transition-all"
                   />
@@ -458,6 +556,9 @@ export function BreakTerminalView({
                         : matchedActiveBreak
                         ? 'บันทึกกลับเข้าปฏิบัติงาน (Clock In)'
                         : `ยืนยันเริ่ม${getBreakTypeLabel(selectedBreakType)}`}
+                    </span>
+                    <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-md bg-white/20 border border-white/30 font-mono-tabular text-[11px] font-semibold">
+                      Enter ↵
                     </span>
                     <motion.span
                       animate={{ x: actionHovered ? 5 : 0 }}
@@ -560,7 +661,19 @@ export function BreakTerminalView({
                         </div>
                       </div>
 
-                      <div className="mt-3 pt-2.5 border-t border-slate-300/60 flex items-center justify-between gap-2">
+                      {/* Liquid Glass Elapsed Progress Bar */}
+                      <div className="mt-3 h-1.5 w-full rounded-full bg-white/60 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            isOverLimit ? 'bg-rose-600' : isInGrace ? 'bg-amber-500' : 'bg-sky-600'
+                          }`}
+                          style={{
+                            width: `${Math.min(100, Math.round((elapsedSec / Math.max(1, maxGraceSec)) * 100))}%`,
+                          }}
+                        />
+                      </div>
+
+                      <div className="mt-2.5 pt-2.5 border-t border-white/50 flex items-center justify-between gap-2">
                         <span
                           className={`text-xs font-semibold ${
                             isOverLimit
@@ -580,7 +693,7 @@ export function BreakTerminalView({
                         <button
                           type="button"
                           onClick={() => handleQuickReturn(item.employee_code)}
-                          className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+                          className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
                         >
                           กลับเข้างาน
                         </button>

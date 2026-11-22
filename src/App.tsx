@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { PublicLivePayload } from './types';
+import type { BreakLogRecord, PublicLivePayload } from './types';
 import { formatBangkokDateISO } from './utils/timeUtils';
 import { SunlitOfficeBackdrop } from './components/SunlitOfficeBackdrop';
 import { BreakTerminalView } from './components/BreakTerminalView';
-import { AdminPortalView } from './components/AdminPortalView';
+import { AdminPortalView, type AdminTab } from './components/AdminPortalView';
 import { IndividualStatsModal } from './components/IndividualStatsModal';
 
 type AppViewMode = 'terminal' | 'admin';
@@ -34,6 +34,8 @@ function getInitialViewMode(): AppViewMode {
 
 export default function App() {
   const [viewMode, setViewMode] = useState<AppViewMode>(getInitialViewMode);
+  const [adminTab, setAdminTab] = useState<AdminTab>('dashboard');
+  const [selectedIndividualCode, setSelectedIndividualCode] = useState<string | null>(null);
   const [liveData, setLiveData] = useState<PublicLivePayload>(INITIAL_LIVE_PAYLOAD);
   const [serverTimeOffsetMs, setServerTimeOffsetMs] = useState(0);
   const [wsConnected, setWsConnected] = useState(false);
@@ -52,6 +54,49 @@ export default function App() {
         setServerTimeOffsetMs(offset);
       }
     }
+    setRealtimeSignal((n) => n + 1);
+  }, []);
+
+  // Append or update a single break record in-place immediately (no page reload, no data loss)
+  const upsertBreakRecord = useCallback((record: BreakLogRecord) => {
+    setLiveData((prev) => {
+      const nextActive =
+        record.status === 'active'
+          ? [record, ...prev.active_breaks.filter((b) => b.id !== record.id)]
+          : prev.active_breaks.filter((b) => b.id !== record.id);
+
+      const nextTodayLogs =
+        record.work_date === prev.today_date
+          ? [record, ...prev.today_logs.filter((l) => l.id !== record.id)]
+          : prev.today_logs;
+
+      const uniqueEmp = new Set(nextTodayLogs.map((l) => l.employee_id)).size;
+      const onTimeCount = nextTodayLogs.filter((l) => l.status === 'on_time').length;
+      const graceCount = nextTodayLogs.filter((l) => l.status === 'grace').length;
+      const overtimeCount = nextTodayLogs.filter(
+        (l) => l.status === 'overtime' || l.violation_recorded === 1
+      ).length;
+      const totalSeconds = nextTodayLogs.reduce(
+        (acc, l) => acc + (l.status !== 'active' ? l.duration_seconds || 0 : 0),
+        0
+      );
+
+      return {
+        ...prev,
+        active_breaks: nextActive,
+        today_logs: nextTodayLogs,
+        today_summary: {
+          ...prev.today_summary,
+          total_breaks: nextTodayLogs.length,
+          active_count: nextActive.length,
+          on_time_count: onTimeCount,
+          grace_count: graceCount,
+          overtime_count: overtimeCount,
+          total_minutes: Math.round(totalSeconds / 60),
+          unique_employees: uniqueEmp,
+        },
+      };
+    });
     setRealtimeSignal((n) => n + 1);
   }, []);
 
@@ -156,6 +201,7 @@ export default function App() {
           serverTimeOffsetMs={serverTimeOffsetMs}
           wsConnected={wsConnected}
           onRefreshLive={fetchLive}
+          onUpsertBreakRecord={upsertBreakRecord}
           onOpenAdminPortal={() => navigateView('admin')}
         />
       ) : (
@@ -163,6 +209,10 @@ export default function App() {
           liveData={liveData}
           serverTimeOffsetMs={serverTimeOffsetMs}
           wsConnected={wsConnected}
+          activeTab={adminTab}
+          onTabChange={setAdminTab}
+          selectedIndividualCode={selectedIndividualCode}
+          onSelectIndividualCode={setSelectedIndividualCode}
           onGoTerminal={() => navigateView('terminal')}
           onOpenEmployeeStats={(code) => setStatsEmployeeCode(code)}
           onRefreshLive={fetchLive}
@@ -170,15 +220,18 @@ export default function App() {
         />
       )}
 
-      {/* Floating Individual Statistics Window (Backend Section) */}
+      {/* Floating Individual Statistics Dashboard Window (Backend Section) */}
       {viewMode === 'admin' && (
         <IndividualStatsModal
           employeeCode={statsEmployeeCode}
           month={liveData.today_date.slice(0, 7)}
           serverTimeOffsetMs={serverTimeOffsetMs}
+          employeesList={liveData.employees}
+          onSelectEmployee={(code) => setStatsEmployeeCode(code)}
           onClose={() => setStatsEmployeeCode(null)}
           canClearData={true}
           onDataCleared={fetchLive}
+          realtimeSignal={realtimeSignal}
         />
       )}
     </div>

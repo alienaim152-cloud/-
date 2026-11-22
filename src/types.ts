@@ -88,16 +88,24 @@ export interface MonthlyEmployeeSummary {
 export interface IndividualStatsResponse {
   employee: EmployeePublic;
   month: string;
+  today_date: string;
   summary: {
     total_breaks: number;
+    active_days: number;
+    today_breaks_count: number;
+    avg_breaks_per_day: number;
     break_1_count: number;
     break_2_count: number;
     quick_out_count: number;
+    avg_break_1_minutes: number;
+    avg_break_2_minutes: number;
+    avg_quick_out_minutes: number;
     on_time_count: number;
     grace_count: number;
     overtime_count: number;
     total_minutes: number;
     avg_minutes: number;
+    max_duration_seconds: number;
     total_exceeded_seconds: number;
     punctuality_rate: number;
   };
@@ -105,9 +113,15 @@ export interface IndividualStatsResponse {
     work_date: string;
     total_minutes: number;
     breaks_count: number;
+    on_time_count: number;
+    grace_count: number;
     overtime_count: number;
+    on_time_minutes: number;
+    grace_minutes: number;
+    overtime_minutes: number;
   }>;
   recent_logs: BreakLogRecord[];
+  today_logs: BreakLogRecord[];
   active_break: BreakLogRecord | null;
 }
 
