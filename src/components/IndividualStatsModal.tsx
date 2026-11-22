@@ -19,7 +19,6 @@ interface IndividualStatsModalProps {
   serverTimeOffsetMs: number;
   onClose: () => void;
   canClearData?: boolean;
-  authToken?: string;
   onDataCleared?: () => void;
 }
 
@@ -28,8 +27,7 @@ export function IndividualStatsModal({
   month,
   serverTimeOffsetMs,
   onClose,
-  canClearData = false,
-  authToken,
+  canClearData = true,
   onDataCleared,
 }: IndividualStatsModalProps) {
   const [selectedMonth, setSelectedMonth] = useState(month);
@@ -72,15 +70,12 @@ export function IndividualStatsModal({
   }, [stats?.active_break]);
 
   const handleClearEmployeeStats = async () => {
-    if (!employeeCode || !authToken) return;
+    if (!employeeCode) return;
     setClearing(true);
     try {
       const res = await fetch(
         `/api/admin/clear?scope=employee&employee_code=${encodeURIComponent(employeeCode)}&month=${encodeURIComponent(selectedMonth)}`,
-        {
-          method: 'DELETE',
-          headers: { Authorization: `Bearer ${authToken}` },
-        }
+        { method: 'DELETE' }
       );
       const data = await res.json();
       if (!res.ok) {
@@ -161,7 +156,7 @@ export function IndividualStatsModal({
                       <Download className="w-3.5 h-3.5" />
                       CSV
                     </button>
-                    {canClearData && authToken && (
+                    {canClearData && (
                       <button
                         type="button"
                         onClick={() => setConfirmClear(true)}

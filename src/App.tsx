@@ -3,7 +3,6 @@ import type { PublicLivePayload } from './types';
 import { formatBangkokDateISO } from './utils/timeUtils';
 import { SunlitOfficeBackdrop } from './components/SunlitOfficeBackdrop';
 import { BreakTerminalView } from './components/BreakTerminalView';
-import { AdminLoginView, type AuthSession } from './components/AdminLoginView';
 import { AdminPortalView } from './components/AdminPortalView';
 import { IndividualStatsModal } from './components/IndividualStatsModal';
 
@@ -35,7 +34,6 @@ function getInitialViewMode(): AppViewMode {
 
 export default function App() {
   const [viewMode, setViewMode] = useState<AppViewMode>(getInitialViewMode);
-  const [authSession, setAuthSession] = useState<AuthSession | null>(null);
   const [liveData, setLiveData] = useState<PublicLivePayload>(INITIAL_LIVE_PAYLOAD);
   const [serverTimeOffsetMs, setServerTimeOffsetMs] = useState(0);
   const [wsConnected, setWsConnected] = useState(false);
@@ -127,6 +125,9 @@ export default function App() {
 
   const navigateView = useCallback((nextView: AppViewMode) => {
     setViewMode(nextView);
+    if (nextView === 'terminal') {
+      setStatsEmployeeCode(null);
+    }
     const url = new URL(window.location.href);
     if (nextView === 'admin') {
       url.searchParams.set('view', 'admin');
@@ -136,8 +137,7 @@ export default function App() {
     window.history.replaceState({}, '', url.toString());
   }, []);
 
-  const backdropMode: 'terminal' | 'login' | 'admin' =
-    viewMode === 'terminal' ? 'terminal' : authSession ? 'admin' : 'login';
+  const backdropMode: 'terminal' | 'admin' = viewMode === 'terminal' ? 'terminal' : 'admin';
 
   return (
     <div className="relative min-h-screen text-slate-900">
@@ -158,21 +158,11 @@ export default function App() {
           onRefreshLive={fetchLive}
           onOpenAdminPortal={() => navigateView('admin')}
         />
-      ) : !authSession ? (
-        <AdminLoginView
-          onSuccess={(session) => setAuthSession(session)}
-          onGoTerminal={() => navigateView('terminal')}
-        />
       ) : (
         <AdminPortalView
-          session={authSession}
           liveData={liveData}
           serverTimeOffsetMs={serverTimeOffsetMs}
           wsConnected={wsConnected}
-          onLogout={() => {
-            setAuthSession(null);
-            setStatsEmployeeCode(null);
-          }}
           onGoTerminal={() => navigateView('terminal')}
           onOpenEmployeeStats={(code) => setStatsEmployeeCode(code)}
           onRefreshLive={fetchLive}
@@ -180,15 +170,14 @@ export default function App() {
         />
       )}
 
-      {/* Floating Individual Statistics Window (Admin Backend Only) */}
-      {viewMode === 'admin' && authSession && (
+      {/* Floating Individual Statistics Window (Backend Section) */}
+      {viewMode === 'admin' && (
         <IndividualStatsModal
           employeeCode={statsEmployeeCode}
           month={liveData.today_date.slice(0, 7)}
           serverTimeOffsetMs={serverTimeOffsetMs}
           onClose={() => setStatsEmployeeCode(null)}
-          canClearData={authSession.user.role === 'super_admin'}
-          authToken={authSession.token}
+          canClearData={true}
           onDataCleared={fetchLive}
         />
       )}

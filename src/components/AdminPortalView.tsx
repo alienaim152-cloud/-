@@ -13,9 +13,7 @@ import {
   Edit3,
   ExternalLink,
   FileSpreadsheet,
-  KeyRound,
   LayoutDashboard,
-  LogOut,
   Menu,
   Plus,
   Search,
@@ -24,14 +22,10 @@ import {
   TrendingUp,
   Upload,
   User,
-  UserCheck,
-  UserPlus,
   Users,
   X,
 } from 'lucide-react';
 import type {
-  AdminRole,
-  AdminUser,
   AuditLogEntry,
   BreakLogRecord,
   CalendarDayAggregate,
@@ -40,7 +34,6 @@ import type {
   MonthlyEmployeeSummary,
   PublicLivePayload,
 } from '../types';
-import type { AuthSession } from './AdminLoginView';
 import {
   EMPLOYEE_STATUS_OPTIONS,
   formatBangkokDateISO,
@@ -66,11 +59,9 @@ import { CalendarHistoryPanel } from './CalendarHistoryPanel';
 import { AdminDashboardOverview } from './AdminDashboardOverview';
 
 interface AdminPortalViewProps {
-  session: AuthSession;
   liveData: PublicLivePayload;
   serverTimeOffsetMs: number;
   wsConnected: boolean;
-  onLogout: () => void;
   onGoTerminal: () => void;
   onOpenEmployeeStats: (code: string) => void;
   onRefreshLive: () => void;
@@ -85,7 +76,6 @@ type AdminTab =
   | 'individual'
   | 'employees'
   | 'logs'
-  | 'users'
   | 'audit';
 
 interface ClearConfirmState {
@@ -96,18 +86,10 @@ interface ClearConfirmState {
   month?: string;
 }
 
-const ROLE_LABELS: Record<AdminRole, string> = {
-  super_admin: 'Super Admin',
-  supervisor: 'Supervisor',
-  hr_viewer: 'HR Viewer',
-};
-
 export function AdminPortalView({
-  session,
   liveData,
   serverTimeOffsetMs,
   wsConnected,
-  onLogout,
   onGoTerminal,
   onOpenEmployeeStats,
   onRefreshLive,
@@ -158,21 +140,11 @@ export function AdminPortalView({
   const [monthlySearch, setMonthlySearch] = useState('');
   const [individualSearch, setIndividualSearch] = useState('');
 
-  // Admin Users & Audit state
-  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  // Audit state
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
-  const [newAdminForm, setNewAdminForm] = useState({
-    username: '',
-    display_name: '',
-    password: '',
-    role: 'supervisor' as AdminRole,
-  });
-  const [showNewAdminModal, setShowNewAdminModal] = useState(false);
-  const [resetPasswordUser, setResetPasswordUser] = useState<AdminUser | null>(null);
-  const [resetPasswordVal, setResetPasswordVal] = useState('');
 
-  const canEdit = session.user.role === 'super_admin' || session.user.role === 'supervisor';
-  const isSuperAdmin = session.user.role === 'super_admin';
+  const canEdit = true;
+  const isSuperAdmin = true;
 
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
@@ -184,9 +156,8 @@ export function AdminPortalView({
   const authHeaders = useMemo(
     () => ({
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${session.token}`,
     }),
-    [session.token]
+    []
   );
 
   const showMessage = (type: 'success' | 'error', text: string) => {
@@ -197,28 +168,20 @@ export function AdminPortalView({
   };
 
   const fetchEmployees = useCallback(async () => {
-    const res = await fetch('/api/admin/employees', { headers: authHeaders });
-    if (res.status === 401) {
-      onLogout();
-      return;
-    }
+    const res = await fetch('/api/admin/employees');
     const data = await res.json();
     if (res.ok) setEmployees(data.employees || []);
-  }, [authHeaders, onLogout]);
+  }, []);
 
   const fetchLogs = useCallback(async () => {
     const params = new URLSearchParams();
     if (logDateFilter) params.set('date', logDateFilter);
     if (logStatusFilter !== 'all') params.set('status', logStatusFilter);
     if (logSearch.trim()) params.set('employee_code', logSearch.trim());
-    const res = await fetch(`/api/admin/logs?${params.toString()}`, { headers: authHeaders });
-    if (res.status === 401) {
-      onLogout();
-      return;
-    }
+    const res = await fetch(`/api/admin/logs?${params.toString()}`);
     const data = await res.json();
     if (res.ok) setLogs(data.logs || []);
-  }, [authHeaders, logDateFilter, logStatusFilter, logSearch, onLogout]);
+  }, [logDateFilter, logStatusFilter, logSearch]);
 
   const fetchReports = useCallback(async () => {
     const res = await fetch(`/api/public/monthly?month=${encodeURIComponent(reportMonth)}`);
@@ -229,30 +192,20 @@ export function AdminPortalView({
     }
   }, [reportMonth]);
 
-  const fetchAdminUsers = useCallback(async () => {
-    if (!canEdit) return;
-    const res = await fetch('/api/admin/users', { headers: authHeaders });
-    if (res.ok) {
-      const data = await res.json();
-      setAdminUsers(data.users || []);
-    }
-  }, [authHeaders, canEdit]);
-
   const fetchAuditLogs = useCallback(async () => {
-    const res = await fetch('/api/admin/audit', { headers: authHeaders });
+    const res = await fetch('/api/admin/audit');
     if (res.ok) {
       const data = await res.json();
       setAuditLogs(data.logs || []);
     }
-  }, [authHeaders]);
+  }, []);
 
   useEffect(() => {
     fetchEmployees();
     fetchLogs();
     fetchReports();
-    fetchAdminUsers();
     fetchAuditLogs();
-  }, [fetchEmployees, fetchLogs, fetchReports, fetchAdminUsers, fetchAuditLogs, realtimeSignal]);
+  }, [fetchEmployees, fetchLogs, fetchReports, fetchAuditLogs, realtimeSignal]);
 
   const departments = useMemo(() => {
     const set = new Set<string>();
@@ -525,76 +478,6 @@ export function AdminPortalView({
     }
   };
 
-  const handleCreateAdminUser = async (e: FormEvent) => {
-    e.preventDefault();
-    const res = await fetch('/api/admin/users', {
-      method: 'POST',
-      headers: authHeaders,
-      body: JSON.stringify(newAdminForm),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showMessage('error', data.error || 'สร้างบัญชีผู้ใช้งานไม่สำเร็จ');
-      return;
-    }
-    showMessage('success', `สร้างบัญชี ${newAdminForm.username} เรียบร้อยแล้ว`);
-    setShowNewAdminModal(false);
-    setNewAdminForm({ username: '', display_name: '', password: '', role: 'supervisor' });
-    fetchAdminUsers();
-    fetchAuditLogs();
-  };
-
-  const handleToggleAdminUser = async (user: AdminUser) => {
-    const res = await fetch(`/api/admin/users/${user.id}`, {
-      method: 'PUT',
-      headers: authHeaders,
-      body: JSON.stringify({ is_active: user.is_active === 1 ? 0 : 1 }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showMessage('error', data.error || 'ปรับสถานะบัญชีไม่สำเร็จ');
-      return;
-    }
-    showMessage('success', 'อัปเดตสถานะสิทธิ์ผู้ใช้งานเรียบร้อยแล้ว');
-    fetchAdminUsers();
-    fetchAuditLogs();
-  };
-
-  const handleChangeAdminRole = async (user: AdminUser, role: AdminRole) => {
-    const res = await fetch(`/api/admin/users/${user.id}`, {
-      method: 'PUT',
-      headers: authHeaders,
-      body: JSON.stringify({ role }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showMessage('error', data.error || 'เปลี่ยนบทบาทไม่สำเร็จ');
-      return;
-    }
-    showMessage('success', `เปลี่ยนสิทธิ์ของ ${user.username} เรียบร้อยแล้ว`);
-    fetchAdminUsers();
-    fetchAuditLogs();
-  };
-
-  const handleResetPassword = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!resetPasswordUser) return;
-    const res = await fetch(`/api/admin/users/${resetPasswordUser.id}`, {
-      method: 'PUT',
-      headers: authHeaders,
-      body: JSON.stringify({ password: resetPasswordVal }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showMessage('error', data.error || 'เปลี่ยนรหัสผ่านไม่สำเร็จ');
-      return;
-    }
-    showMessage('success', `รีเซ็ตรหัสผ่านของ ${resetPasswordUser.username} เรียบร้อยแล้ว`);
-    setResetPasswordUser(null);
-    setResetPasswordVal('');
-    fetchAuditLogs();
-  };
-
   const navGroups: Array<{
     groupLabel: string;
     items: Array<{ id: AdminTab; label: string; icon: typeof LayoutDashboard }>;
@@ -614,7 +497,6 @@ export function AdminPortalView({
       items: [
         { id: 'employees', label: 'พนักงาน & นำเข้า', icon: Users },
         { id: 'logs', label: 'บันทึกเวลาทั้งหมด', icon: Activity },
-        ...(canEdit ? [{ id: 'users' as const, label: 'ควบคุมสิทธิ์ผู้ใช้', icon: UserCheck }] : []),
         { id: 'audit', label: 'บันทึกการทำงานระบบ', icon: Shield },
       ],
     },
@@ -634,8 +516,8 @@ export function AdminPortalView({
             <Shield className="w-4 h-4" />
           </div>
           <div>
-            <div className="text-sm font-bold text-slate-900">BreakSync Admin</div>
-            <div className="text-[11px] font-medium text-sky-700">{session.user.username}</div>
+            <div className="text-sm font-bold text-slate-900">Admin</div>
+            <div className="text-[11px] font-medium text-sky-700">ระบบหลังบ้าน</div>
           </div>
         </div>
         <button
@@ -665,9 +547,9 @@ export function AdminPortalView({
                   <Shield className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-sm font-bold text-slate-900 truncate">BreakSync Admin</div>
+                  <div className="text-sm font-bold text-slate-900 truncate">Admin</div>
                   <div className="text-[11px] font-medium text-sky-700 truncate">
-                    {wsConnected ? 'ซิงก์เรียลไทม์' : 'กำลังเชื่อมต่อ'}
+                    {wsConnected ? 'ระบบหลังบ้าน · เรียลไทม์' : 'กำลังเชื่อมต่อ'}
                   </div>
                 </div>
               </div>
@@ -725,47 +607,38 @@ export function AdminPortalView({
           </div>
         </div>
 
-        {/* Bottom Floating User & Window Switcher */}
+        {/* Bottom Floating Label & Page Switcher */}
         <div className="pt-3 mt-3 border-t border-slate-300/60 space-y-2">
           {!sidebarCollapsed && (
             <div className="liquid-glass-card rounded-2xl px-3 py-2.5">
-              <div className="text-xs font-bold text-slate-900 truncate">{session.user.display_name}</div>
-              <div className="text-[11px] font-semibold text-sky-700 font-mono-tabular">
-                {session.user.username} · {ROLE_LABELS[session.user.role]}
+              <div className="text-xs font-bold text-slate-900 truncate">Admin</div>
+              <div className="text-[11px] font-medium text-sky-700">
+                ระบบจัดการข้อมูลและรายงานหลังบ้าน
               </div>
             </div>
           )}
 
-          <div className={`flex ${sidebarCollapsed ? 'flex-col' : 'items-center'} gap-1.5`}>
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={onGoTerminal}
+              title="สลับไปหน้าลงเวลาพัก"
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              {!sidebarCollapsed && <span>สลับไปหน้าลงเวลา</span>}
+            </button>
             <a
               href="/?view=terminal"
               target="_blank"
               rel="noopener noreferrer"
               title="เปิดหน้าลงเวลาพักในหน้าต่างใหม่"
-              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-800 hover:bg-white/90 transition-colors whitespace-nowrap"
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-800 hover:bg-white/90 transition-colors whitespace-nowrap"
             >
               <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-              {!sidebarCollapsed && <span>หน้าลงเวลา</span>}
+              {!sidebarCollapsed && <span>เปิดหน้าลงเวลา (แท็บใหม่)</span>}
             </a>
-            <button
-              type="button"
-              onClick={onGoTerminal}
-              title="สลับไปหน้าลงเวลา"
-              className="px-3 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-700 hover:bg-white/90 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              {sidebarCollapsed ? 'สลับ' : 'สลับหน้า'}
-            </button>
           </div>
-
-          <button
-            type="button"
-            onClick={onLogout}
-            title="ออกจากระบบ"
-            className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition-colors cursor-pointer whitespace-nowrap"
-          >
-            <LogOut className="w-3.5 h-3.5 shrink-0" />
-            {!sidebarCollapsed && <span>ออกจากระบบ</span>}
-          </button>
         </div>
       </aside>
 
@@ -1904,120 +1777,6 @@ export function AdminPortalView({
           </div>
         )}
 
-        {/* TAB: ADMIN USER & RBAC CONTROL */}
-        {activeTab === 'users' && canEdit && (
-          <div className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-bold text-slate-900">ควบคุมสิทธิ์ผู้ใช้งานระบบหลังบ้าน (RBAC)</h2>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  กำหนดบทบาท ระงับสิทธิ์ หรือรีเซ็ตรหัสผ่านผู้ดูแลและหัวหน้างาน
-                </p>
-              </div>
-              {isSuperAdmin && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowNewAdminModal(true)}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white shadow-sm cursor-pointer"
-                  >
-                    <UserPlus className="w-4 h-4" />
-                    เพิ่มบัญชีผู้ดูแล
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setClearConfirm({
-                        scope: 'audit',
-                        title: 'ล้างบันทึกกิจกรรมผู้ใช้งานระบบ',
-                        description: 'ล้างบันทึก Audit Log ของการเข้าสู่ระบบและแก้ไขสิทธิ์ทั้งหมด (เฉพาะ Admin เท่านั้น)',
-                      })
-                    }
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-rose-600/15 text-rose-700 border border-rose-500/35 hover:bg-rose-600 hover:text-white transition-colors cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    ล้างบันทึกสิทธิ์
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="overflow-x-auto rounded-2xl border border-slate-300/60 bg-white/55">
-              <table className="w-full text-left border-collapse text-sm">
-                <thead className="bg-white/85 text-xs text-slate-700 border-b border-slate-300/60">
-                  <tr>
-                    <th className="py-3 px-3.5 font-semibold">ชื่อผู้ใช้</th>
-                    <th className="py-3 px-3.5 font-semibold">ชื่อที่แสดง</th>
-                    <th className="py-3 px-3.5 font-semibold">ระดับสิทธิ์</th>
-                    <th className="py-3 px-3.5 font-semibold">สถานะ</th>
-                    <th className="py-3 px-3.5 font-semibold text-right">จัดการ</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200/70">
-                  {adminUsers.map((u) => (
-                    <tr key={u.id} className="hover:bg-white/70">
-                      <td className="py-3 px-3.5 font-mono-tabular text-sky-700 font-bold">{u.username}</td>
-                      <td className="py-3 px-3.5 text-slate-900 font-medium">{u.display_name}</td>
-                      <td className="py-3 px-3.5">
-                        {isSuperAdmin && u.username.toLowerCase() !== 'admin' ? (
-                          <select
-                            value={u.role}
-                            onChange={(e) => handleChangeAdminRole(u, e.target.value as AdminRole)}
-                            className="px-2.5 py-1 rounded-lg liquid-glass-input text-xs text-slate-900"
-                          >
-                            <option value="super_admin">Super Admin</option>
-                            <option value="supervisor">Supervisor</option>
-                            <option value="hr_viewer">HR Viewer</option>
-                          </select>
-                        ) : (
-                          <span className="text-xs font-semibold text-slate-700">{ROLE_LABELS[u.role]}</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-3.5">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border ${
-                            u.is_active === 1
-                              ? 'bg-emerald-500/15 text-emerald-800 border-emerald-600/30'
-                              : 'bg-rose-500/15 text-rose-800 border-rose-600/30'
-                          }`}
-                        >
-                          {u.is_active === 1 ? 'ใช้งานได้' : 'ถูกระงับสิทธิ์'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3.5 text-right whitespace-nowrap">
-                        {isSuperAdmin && (
-                          <div className="inline-flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setResetPasswordUser(u);
-                                setResetPasswordVal('');
-                              }}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold liquid-glass-card text-sky-700 hover:bg-white/90 cursor-pointer"
-                            >
-                              <KeyRound className="w-3 h-3" />
-                              เปลี่ยนรหัสผ่าน
-                            </button>
-                            {u.username.toLowerCase() !== 'admin' && (
-                              <button
-                                type="button"
-                                onClick={() => handleToggleAdminUser(u)}
-                                className="px-2.5 py-1 rounded-lg text-xs font-semibold liquid-glass-card text-slate-800 hover:bg-white/90 cursor-pointer"
-                              >
-                                {u.is_active === 1 ? 'ระงับสิทธิ์' : 'เปิดใช้งาน'}
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
         {/* TAB: AUDIT LOGS */}
         {activeTab === 'audit' && (
           <div className="liquid-glass rounded-3xl p-5 sm:p-6 space-y-4">
@@ -2251,124 +2010,6 @@ export function AdminPortalView({
                   className="px-5 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white shadow-sm cursor-pointer"
                 >
                   บันทึกข้อมูล
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Create Admin User */}
-      {showNewAdminModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/45 backdrop-blur-sm"
-          onClick={() => setShowNewAdminModal(false)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md liquid-glass-strong rounded-3xl p-6"
-          >
-            <h3 className="text-lg font-bold text-slate-900 mb-4">เพิ่มผู้ใช้งานระบบหลังบ้าน</h3>
-            <form onSubmit={handleCreateAdminUser} className="space-y-3 text-sm">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">ชื่อผู้ใช้ (Username)</label>
-                <input
-                  required
-                  type="text"
-                  value={newAdminForm.username}
-                  onChange={(e) => setNewAdminForm({ ...newAdminForm, username: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">ชื่อแสดงผล</label>
-                <input
-                  required
-                  type="text"
-                  value={newAdminForm.display_name}
-                  onChange={(e) => setNewAdminForm({ ...newAdminForm, display_name: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">รหัสผ่าน (อย่างน้อย 6 ตัวอักษร)</label>
-                <input
-                  required
-                  minLength={6}
-                  type="password"
-                  value={newAdminForm.password}
-                  onChange={(e) => setNewAdminForm({ ...newAdminForm, password: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">บทบาทสิทธิ์</label>
-                <select
-                  value={newAdminForm.role}
-                  onChange={(e) => setNewAdminForm({ ...newAdminForm, role: e.target.value as AdminRole })}
-                  className="w-full px-3 py-2 rounded-xl liquid-glass-input text-slate-900"
-                >
-                  <option value="super_admin">Super Admin (จัดการได้ทั้งหมด)</option>
-                  <option value="supervisor">Supervisor (จัดการพนักงาน & บันทึก)</option>
-                  <option value="hr_viewer">HR Viewer (ดูและดาวน์โหลดรายงาน)</option>
-                </select>
-              </div>
-              <div className="flex justify-end gap-2 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowNewAdminModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold liquid-glass-card text-slate-700 cursor-pointer"
-                >
-                  ยกเลิก
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white cursor-pointer"
-                >
-                  สร้างบัญชี
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Modal: Reset Admin Password */}
-      {resetPasswordUser && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/45 backdrop-blur-sm"
-          onClick={() => setResetPasswordUser(null)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm liquid-glass-strong rounded-3xl p-6"
-          >
-            <h3 className="text-base font-bold text-slate-900 mb-3">
-              ตั้งรหัสผ่านใหม่สำหรับ {resetPasswordUser.username}
-            </h3>
-            <form onSubmit={handleResetPassword} className="space-y-3">
-              <input
-                required
-                minLength={6}
-                type="password"
-                placeholder="รหัสผ่านใหม่ (อย่างน้อย 6 ตัวอักษร)"
-                value={resetPasswordVal}
-                onChange={(e) => setResetPasswordVal(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl liquid-glass-input text-sm text-slate-900"
-              />
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setResetPasswordUser(null)}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold liquid-glass-card text-slate-700 cursor-pointer"
-                >
-                  ยกเลิก
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 rounded-xl text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white cursor-pointer"
-                >
-                  บันทึกรหัสผ่าน
                 </button>
               </div>
             </form>
