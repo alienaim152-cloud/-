@@ -1,0 +1,8 @@
+{
+  "name": " ระบบบันทึกเวลาพักเบรกพนักงาน",
+  "description": "ระบบบันทึกเวลาพักพนักงานแบบเรียลไทม์พร้อมรายงานรายวัน รายเดือน ปฏิทินย้อนหลัง และระบบแอดมิน บนพื้นหลังห้องทำงาน 3 มิติ",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', 'Noto Sans Thai', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #e8f2fc;
+    color: #0f172a;
+    overflow-x: hidden;
+  }
+
+  .font-mono-tabular {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Bright Luminous Liquid Glass UI System */
+.liquid-glass {
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.72) 0%,
+    rgba(241, 248, 255, 0.62) 55%,
+    rgba(224, 242, 254, 0.56) 100%
+  );
+  backdrop-filter: blur(20px) saturate(165%);
+  -webkit-backdrop-filter: blur(20px) saturate(165%);
+  border: 1px solid rgba(255, 255, 255, 0.78);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.92),
+    inset 0 -1px 0 0 rgba(14, 165, 233, 0.12),
+    0 18px 42px -14px rgba(15, 23, 42, 0.16);
+}
+
+.liquid-glass-strong {
+  background: linear-gradient(
+    150deg,
+    rgba(255, 255, 255, 0.84) 0%,
+    rgba(248, 251, 255, 0.76) 50%,
+    rgba(232, 244, 255, 0.72) 100%
+  );
+  backdrop-filter: blur(26px) saturate(175%);
+  -webkit-backdrop-filter: blur(26px) saturate(175%);
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.96),
+    0 24px 55px -16px rgba(15, 23, 42, 0.22);
+}
+
+.liquid-glass-card {
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.66) 0%,
+    rgba(241, 245, 249, 0.52) 100%
+  );
+  backdrop-filter: blur(12px) saturate(145%);
+  -webkit-backdrop-filter: blur(12px) saturate(145%);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.85),
+    0 4px 14px -4px rgba(15, 23, 42, 0.08);
+}
+
+.liquid-glass-input {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  color: #0f172a;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.liquid-glass-input:focus {
+  border-color: rgba(2, 132, 199, 0.75);
+  background: rgba(255, 255, 255, 0.92);
+}
+
+/* Custom subtle scrollbars for tables and drawers */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(226, 232, 240, 0.55);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.45);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(2, 132, 199, 0.65);
+}
